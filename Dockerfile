@@ -20,7 +20,7 @@ ARG LLAMA_REF
 ARG GPU_TARGETS=gfx942
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        build-essential cmake git ccache libcurl4-openssl-dev ca-certificates \
+        build-essential cmake git ccache libcurl4-openssl-dev libssl-dev ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
@@ -69,7 +69,7 @@ RUN set -eu; \
 # Record the real linkage. Feeds the slim variant (README "Fat vs slim") so the
 # runtime package list is derived, never guessed. Also fails loudly on "not found".
 RUN set -eu; \
-    LD_LIBRARY_PATH=/opt/llama/lib ldd /opt/llama/bin/llama-server \
+    LD_LIBRARY_PATH=/opt/llama/lib:/opt/rocm/lib ldd /opt/llama/bin/llama-server \
         | sort > /opt/llama/DEPS.txt; \
     cat /opt/llama/DEPS.txt; \
     if grep -q 'not found' /opt/llama/DEPS.txt; then \
