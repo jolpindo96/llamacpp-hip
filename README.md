@@ -206,7 +206,14 @@ default `-c 16384` stays appropriate.
 
 ## The pin
 
-`6036c635e` (master, 2026-08-24). Every requirement below is met only at HEAD:
+`6036c635e` (2026-08-24 10:43 +0300). This is a real commit on `origin/master`, but
+it is **not** master's tip — at time of writing `origin/master` is `f280b2698`, nine
+commits ahead. `6036c635e` is deliberately chosen anyway: none of those nine touch
+`deepseek4`, `dflash`, `common/speculative.*`, or `ggml-hip` (the only one in that
+area is `a14dba686`, cosmetic CUDA/Metal device naming), so they add nothing here
+while subtracting soak time.
+
+Every requirement below is met only at or after this commit:
 
 | Requirement | Landed | In `07822bddf`? |
 |---|---|---|
@@ -225,9 +232,19 @@ so the `ggml_clamp` fix touches an op this model family depends on. (The specifi
 failure mode of that bug was not verified here; pinning at or after it is simply the
 safe side.)
 
-Trade-off: `6036c635e` is hours old and has minimal soak. `bf0a29cc1` is the
+Trade-off: `6036c635e` is a day old with limited soak. `bf0a29cc1` is the
 conservative alternative — it keeps the rollback and embeddings fixes and gives up
-only the clamp fix.
+only the clamp fix. Going the other way, `f280b2698` (master tip) adds only Metal,
+WebGPU, and convert-script changes irrelevant to a HIP DeepSeek-V4 build.
+
+### Provenance of this analysis
+
+The architecture findings above were read from a local llama.cpp checkout detached at
+`6036c635e`, whose only working-tree modification is `ggml/src/ggml-cuda/CMakeLists.txt`
+(a local `-use_fast_math` removal). That file is CUDA-only, guarded by
+`CUDAToolkit_FOUND`, and is not among the files the analysis reads — so it does not
+affect any conclusion here. The image itself clones upstream at `LLAMA_REF` and is
+independent of that checkout.
 
 ### Verified drafter configuration
 
