@@ -140,6 +140,46 @@ land on top of `07822bddf`:
 | `2c6b141ef` | common: fix draft-mtp with embeddings (#26352, #27299) |
 | `bf0a29cc1` | Deepseek 4: `-sm tensor` (#26490) |
 
-Whether the `UD-Q8_K_XL` GGUF bundles the ~20B draft module is answerable off-pod by
-range-reading the GGUF header for the DSpark tensors named in `src/models/dflash.cpp`
-(`markov_w1`, `markov_w2`, `conf_proj`). *Finding to be recorded here.*
+### Probe result (2026-08-24, off-pod, $0)
+
+Range-read the GGUF headers of every quant in `unsloth/DeepSeek-V4-Flash-0731-GGUF`
+directly from HuggingFace. Four findings, all of which change the serving plan:
+
+**1. There is no Q8. The repo tops out at IQ4.**
+
+| Quant | Shards | Size | Tensors |
+|---|---|---|---|
+| UD-IQ1_S / UD-IQ1_M | 3 | 82.5 / 86.9 GB | 1328 |
+| UD-IQ2_XXS / UD-IQ2_M | 3 | 90.9 GB | 1328 |
+| UD-Q2_K_XL | 3 | 96.8 GB | 1328 |
+| UD-Q3_K_M | 3 | 98.8 GB | **1032 — suspect** |
+| UD-IQ3_XXS / UD-IQ3_S | 4 | 104.2 / 116.1 GB | 1328 |
+| **UD-IQ4_XS / UD-IQ4_NL** | 4 | **136.7 GB** | 1328 |
+
+`MODEL_GLOB=*UD-Q8_K_XL*` matches nothing. And Q8 was never viable here: the model
+is `256x8.4B` (43 layers, 256 experts, 6 active), so Q8 would land near 280–300 GB
+against MI300X's 192 GB HBM. **UD-IQ4_XS at 136.7 GB is the right target** — it fits
+with roughly 55 GB left for KV cache.
+
+**2. `UD-Q3_K_M` carries 1032 tensors where every other quant carries 1328.** That is
+296 missing, not a different layout. Treat it as incomplete and avoid it.
+
+**3. No DSpark / MTP tensors in any quant.** All 1328 tensors are `blk.0`–`blk.42`
+plus `output.weight`, `output_norm.weight`, `token_embd.weight`, and the
+hyper-connection tensors `output_hc_{base,fn,scale}.weight`. Zero matches for
+`markov_w1`, `conf_proj`, `nextn`, `dspark`, or `eh_proj`.
+
+The upstream base model *does* declare `num_nextn_predict_layers: 1` plus
+`dspark_block_size` / `dspark_markov_rank` / `dspark_target_layer_ids` in its
+`config.json` — the conversion dropped them. So the draft module is **not** in these
+GGUFs.
+
+**Consequence: speculative decoding is unavailable on this model as shipped.** Leave
+`DRAFT_REPO` unset — there is nothing to point it at. `deepseek-ai/DeepSeek-V4-Flash-DSpark`
+exists but is safetensors-only (~167 GB, 48 shards) with no GGUF conversion published.
+Serving is dense-decode only until someone converts a draft head.
+
+**4. VRAM budget is settled without renting anything.** 136.7 GB of weights on 192 GB.
+The original 162 GB / 182 GB figures corresponded to no actual file. Note
+`context_length` is 1048576 with `rope.scaling.original_context_length` 65536 — the
+default `-c 16384` stays appropriate.
