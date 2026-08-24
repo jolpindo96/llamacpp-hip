@@ -164,7 +164,7 @@ with roughly 55 GB left for KV cache.
 **2. `UD-Q3_K_M` carries 1032 tensors where every other quant carries 1328.** That is
 296 missing, not a different layout. Treat it as incomplete and avoid it.
 
-**3. No DSpark / MTP tensors in any quant.** All 1328 tensors are `blk.0`–`blk.42`
+**3. No DSpark / MTP tensors in any base quant.** All 1328 tensors are `blk.0`–`blk.42`
 plus `output.weight`, `output_norm.weight`, `token_embd.weight`, and the
 hyper-connection tensors `output_hc_{base,fn,scale}.weight`. Zero matches for
 `markov_w1`, `conf_proj`, `nextn`, `dspark`, or `eh_proj`.
@@ -174,10 +174,30 @@ The upstream base model *does* declare `num_nextn_predict_layers: 1` plus
 `config.json` — the conversion dropped them. So the draft module is **not** in these
 GGUFs.
 
-**Consequence: speculative decoding is unavailable on this model as shipped.** Leave
-`DRAFT_REPO` unset — there is nothing to point it at. `deepseek-ai/DeepSeek-V4-Flash-DSpark`
-exists but is safetensors-only (~167 GB, 48 shards) with no GGUF conversion published.
-Serving is dense-decode only until someone converts a draft head.
+**Consequence: the draft head ships separately, and most community conversions
+will not load.** The unsloth repo is base-only, but standalone DSpark drafter GGUFs
+do exist. Their `general.architecture` strings were probed against llama.cpp's
+registry in `src/llama-arch.cpp`:
+
+| Drafter repo | Arch string | Size | Verdict |
+|---|---|---|---|
+| `alessandrobologna/...0731-DSpark-Drafter-GGUF` | `deepseek_v4_flash_dspark_draft` | 7.0–10.9 GB | **rejected** — not registered |
+| `bleysg/...DSpark-drafter-GGUF` | `deepseek4-dspark` | 6.97 GB | **rejected** — not registered |
+| `Lucebox/...0731-DSpark-GGUF` | `deepseek4-dflash-draft` | 10.7–11.3 GB | **rejected** — not registered |
+| **`Unkto/...0731-DSpark-Drafter-IQ1M-IQ2XXS-GGUF`** | **`dflash`** | **4.8 / 5.5 GB** | **loads** |
+
+Only `dflash` is registered (`llama-arch.cpp:142`), and only the Unkto conversion
+uses it — with exactly the canonical tensor names the loader expects: `markov_w1`,
+`markov_w2`, `conf_proj` (`llama-arch.cpp:651-653`). The other three carry the right
+weights under architecture strings llama.cpp does not know, and will fail at load.
+Download counts are not a signal here: the most-downloaded drafter is one of the
+rejected ones.
+
+Recommended pairing: base `UD-IQ4_XS` (136.7 GB) + drafter `IQ2_XXS` (5.54 GB) =
+**142.2 GB**, leaving ~50 GB for KV cache on a 192 GB MI300X. The drafter is a
+3-layer `256x594M` MoE. IQ1_M/IQ2_XXS is more aggressive than the Q4 the original
+plan suggested, but draft quality is laundered by verification — the cost is
+acceptance rate, not output quality.
 
 **4. VRAM budget is settled without renting anything.** 136.7 GB of weights on 192 GB.
 The original 162 GB / 182 GB figures corresponded to no actual file. Note
