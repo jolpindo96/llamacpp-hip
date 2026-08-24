@@ -203,3 +203,54 @@ acceptance rate, not output quality.
 The original 162 GB / 182 GB figures corresponded to no actual file. Note
 `context_length` is 1048576 with `rope.scaling.original_context_length` 65536 — the
 default `-c 16384` stays appropriate.
+
+## The pin
+
+`6036c635e` (master, 2026-08-24). Every requirement below is met only at HEAD:
+
+| Requirement | Landed | In `07822bddf`? |
+|---|---|---|
+| `deepseek4` base arch (V4 Flash + MTP + DSpark) | `596a5795b` 08-02 | yes |
+| `dflash` draft arch + `draft-dspark` spec type | `d1b34251b` 06-28 | yes |
+| IEEE-conformant HIP (no unsafe-math) | `e79e4bf66` 08-13 | yes |
+| `draft-mtp` with embeddings fix | `2c6b141ef` 08-22 | **no** |
+| DeepseekV4 rollback with multi-seq | `b0539c43e` 08-23 | **no** |
+| `ggml_clamp` fix | `6036c635e` 08-24 | **no** |
+
+Two of those are load-bearing now that speculative decoding is in play.
+`b0539c43e` fixes rollback under concurrent sequences — the exact path a server
+exercises on every draft rejection. And `dflash` reads `swiglu_clamp_exp` /
+`swiglu_clamp_shexp` (`src/models/dflash.cpp:36`), which the drafter GGUF supplies,
+so the `ggml_clamp` fix touches an op this model family depends on. (The specific
+failure mode of that bug was not verified here; pinning at or after it is simply the
+safe side.)
+
+Trade-off: `6036c635e` is hours old and has minimal soak. `bf0a29cc1` is the
+conservative alternative — it keeps the rollback and embeddings fixes and gives up
+only the clamp fix.
+
+### Verified drafter configuration
+
+`Unkto/DeepSeek-V4-Flash-0731-DSpark-Drafter-IQ1M-IQ2XXS-GGUF`, probed header:
+
+- `general.architecture = dflash`, `markov_w1.weight` present → auto-detects as
+  `draft-dspark` (`common/speculative.cpp:2265`). No `--spec-type` needed.
+- `dflash.block_size = 5` is present, so the loader does **not** fall back to its
+  default of 16. `dflash.sample_from_anchor` is absent → false.
+- Therefore `n_draft_max = block_size - 1 = 4`, which is exactly what the bootstrap
+  passes as `--spec-draft-n-max 4`.
+- `mask_token_id = 128799` matches the base model's `dspark_noise_token_id`.
+- 3 layers, `256x594M`, imatrix-quantized.
+
+### Template environment
+
+```
+MODEL_REPO      = unsloth/DeepSeek-V4-Flash-0731-GGUF
+MODEL_GLOB      = *UD-IQ4_XS*
+DRAFT_REPO      = Unkto/DeepSeek-V4-Flash-0731-DSpark-Drafter-IQ1M-IQ2XXS-GGUF
+LLAMACPP_REF    = (unset - use baked binaries)
+MIN_MODEL_BYTES = 130000000000
+SERVER_ARGS     = -c 16384 -ngl 999 -fa on --no-mmap
+```
+
+Total resident: 136.7 GB base + 5.5 GB draft = **142.2 GB** of 192 GB.
