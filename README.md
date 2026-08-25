@@ -140,69 +140,71 @@ land on top of `07822bddf`:
 | `2c6b141ef` | common: fix draft-mtp with embeddings (#26352, #27299) |
 | `bf0a29cc1` | Deepseek 4: `-sm tensor` (#26490) |
 
-### Probe result (2026-08-24, off-pod, $0)
+### Model survey (corrected 2026-08-25)
 
-Range-read the GGUF headers of every quant in `unsloth/DeepSeek-V4-Flash-0731-GGUF`
-directly from HuggingFace. Four findings, all of which change the serving plan:
+**An earlier revision of this file was wrong.** It claimed no Q8 quant existed, that
+Q8 could never fit an MI300X, that `UD-Q3_K_M` was damaged, and that no DSpark GGUF
+shipped in the unsloth repo. All four were artifacts of one mistake: the HuggingFace
+tree API paginates via a `Link: rel="next"` header, and the probe read page 1 of 2 —
+36 of 54 files. The truncation cut the listing off alphabetically at `UD-Q3_K_M`,
+hiding every quant after it.
 
-**1. There is no Q8. The repo tops out at IQ4.**
+The actual repo contents:
 
-| Quant | Shards | Size | Tensors |
-|---|---|---|---|
-| UD-IQ1_S / UD-IQ1_M | 3 | 82.5 / 86.9 GB | 1328 |
-| UD-IQ2_XXS / UD-IQ2_M | 3 | 90.9 GB | 1328 |
-| UD-Q2_K_XL | 3 | 96.8 GB | 1328 |
-| UD-Q3_K_M | 3 | 98.8 GB | **1032 — suspect** |
-| UD-IQ3_XXS / UD-IQ3_S | 4 | 104.2 / 116.1 GB | 1328 |
-| **UD-IQ4_XS / UD-IQ4_NL** | 4 | **136.7 GB** | 1328 |
+| Quant | Shards | Size |
+|---|---|---|
+| UD-IQ1_S / UD-IQ1_M | 3 | 82.5 / 86.9 GB |
+| UD-IQ2_XXS / UD-IQ2_M | 3 | 90.9 GB |
+| UD-Q2_K_XL | 3 | 96.8 GB |
+| UD-IQ3_XXS / UD-IQ3_S | 4 | 104.2 / 116.1 GB |
+| UD-Q3_K_M / UD-Q3_K_XL | 4 | 128.1 / 128.2 GB |
+| UD-IQ4_XS / UD-IQ4_NL | 4 | 136.7 GB |
+| UD-Q4_K_XL | 5 | 155.1 GB |
+| **UD-Q8_K_XL** | 5 | **161.9 GB** |
+| `dspark/…-BF16.gguf` | 1 | 11.3 GB |
+| `…-dspark-…-Q8_0.gguf` (root) | 1 | 10.9 GB |
 
-`MODEL_GLOB=*UD-Q8_K_XL*` matches nothing. And Q8 was never viable here: the model
-is `256x8.4B` (43 layers, 256 experts, 6 active), so Q8 would land near 280–300 GB
-against MI300X's 192 GB HBM. **UD-IQ4_XS at 136.7 GB is the right target** — it fits
-with roughly 55 GB left for KV cache.
+Unsloth documents `UD-Q8_K_XL` as full-precision lossless. **Any paginated listing
+must follow `Link: rel="next"`** — a truncated one looks complete and is not.
 
-**2. `UD-Q3_K_M` carries 1032 tensors where every other quant carries 1328.** That is
-296 missing, not a different layout. Treat it as incomplete and avoid it.
+### DSpark drafters
 
-**3. No DSpark / MTP tensors in any base quant.** All 1328 tensors are `blk.0`–`blk.42`
-plus `output.weight`, `output_norm.weight`, `token_embd.weight`, and the
-hyper-connection tensors `output_hc_{base,fn,scale}.weight`. Zero matches for
-`markov_w1`, `conf_proj`, `nextn`, `dspark`, or `eh_proj`.
+The model repo ships its own, and both use llama.cpp's canonical `dflash`
+architecture with the expected `markov_w1` / `markov_w2` / `conf_proj` tensors:
 
-The upstream base model *does* declare `num_nextn_predict_layers: 1` plus
-`dspark_block_size` / `dspark_markov_rank` / `dspark_target_layer_ids` in its
-`config.json` — the conversion dropped them. So the draft module is **not** in these
-GGUFs.
+```
+…-dspark-…-Q8_0.gguf    10.9 GB   arch=dflash  block_count=3  block_size=5
+dspark/…-BF16.gguf      11.3 GB   arch=dflash  block_count=3  block_size=5
+```
 
-**Consequence: the draft head ships separately, and most community conversions
-will not load.** The unsloth repo is base-only, but standalone DSpark drafter GGUFs
-do exist. Their `general.architecture` strings were probed against llama.cpp's
-registry in `src/llama-arch.cpp`:
+Third-party conversions are a trap worth knowing about. Of four popular ones probed,
+only `Unkto/…-DSpark-Drafter-IQ1M-IQ2XXS-GGUF` declares `dflash`; the others use
+`deepseek_v4_flash_dspark_draft`, `deepseek4-dspark`, and `deepseek4-dflash-draft`,
+none of which llama.cpp registers — `common/speculative.cpp` gates on
+`arch != "dflash"`, so they carry correct weights and still fail at load. The
+most-downloaded drafter is one of the rejected ones.
 
-| Drafter repo | Arch string | Size | Verdict |
-|---|---|---|---|
-| `alessandrobologna/...0731-DSpark-Drafter-GGUF` | `deepseek_v4_flash_dspark_draft` | 7.0–10.9 GB | **rejected** — not registered |
-| `bleysg/...DSpark-drafter-GGUF` | `deepseek4-dspark` | 6.97 GB | **rejected** — not registered |
-| `Lucebox/...0731-DSpark-GGUF` | `deepseek4-dflash-draft` | 10.7–11.3 GB | **rejected** — not registered |
-| **`Unkto/...0731-DSpark-Drafter-IQ1M-IQ2XXS-GGUF`** | **`dflash`** | **4.8 / 5.5 GB** | **loads** |
+### Measured on MI300X, 2026-08-25
 
-Only `dflash` is registered (`llama-arch.cpp:142`), and only the Unkto conversion
-uses it — with exactly the canonical tensor names the loader expects: `markov_w1`,
-`markov_w2`, `conf_proj` (`llama-arch.cpp:651-653`). The other three carry the right
-weights under architecture strings llama.cpp does not know, and will fail at load.
-Download counts are not a signal here: the most-downloaded drafter is one of the
-rejected ones.
+`UD-Q8_K_XL` + the in-repo `Q8_0` drafter, one MI300X (206.1 GB usable):
 
-Recommended pairing: base `UD-IQ4_XS` (136.7 GB) + drafter `IQ2_XXS` (5.54 GB) =
-**142.2 GB**, leaving ~50 GB for KV cache on a 192 GB MI300X. The drafter is a
-3-layer `256x594M` MoE. IQ1_M/IQ2_XXS is more aggressive than the Q4 the original
-plan suggested, but draft quality is laundered by verification — the cost is
-acceptance rate, not output quality.
+| KV cache | Context | VRAM | Decode | Draft accept |
+|---|---|---|---|---|
+| **q8_0** | **1,048,576 (full 1M)** | 192.9 GB (94%) | **45.2 tok/s** | 70.3% |
+| bf16 | 524,288 | 190.9 GB (93%) | 40.7 tok/s | 64.6% |
 
-**4. VRAM budget is settled without renting anything.** 136.7 GB of weights on 192 GB.
-The original 162 GB / 182 GB figures corresponded to no actual file. Note
-`context_length` is 1048576 with `rope.scaling.original_context_length` 65536 — the
-default `-c 16384` stays appropriate.
+q8_0 KV yields 2x the context of bf16 for the same memory and runs ~11% faster. The
+model's full 1M trained context fits only because of it.
+
+An earlier IQ4_XS run measured speculation's contribution directly: **31.2 tok/s with
+no drafter versus 49.9–51.9 with one, ~1.6x.**
+
+### `-c 0` is unsafe with a draft model
+
+llama.cpp logs `failed to measure the memory of the extra model, fitting without it`
+— the memory fitter sizes the context **ignoring the drafter's ~11 GB**. With q8_0 KV
+that landed at 94% and worked; with bf16 it overcommitted, OOMed, and put the pod in
+an unrecoverable crash loop. Set `-c` explicitly whenever a drafter is loaded.
 
 ## The pin
 
@@ -263,11 +265,13 @@ independent of that checkout.
 
 ```
 MODEL_REPO      = unsloth/DeepSeek-V4-Flash-0731-GGUF
-MODEL_GLOB      = *UD-IQ4_XS*
-DRAFT_REPO      = Unkto/DeepSeek-V4-Flash-0731-DSpark-Drafter-IQ1M-IQ2XXS-GGUF
+MODEL_GLOB      = *UD-Q8_K_XL*
+DRAFT_REPO      = unsloth/DeepSeek-V4-Flash-0731-GGUF
+DRAFT_GLOB      = *dspark*Q8_0*
 LLAMACPP_REF    = (unset - use baked binaries)
-MIN_MODEL_BYTES = 130000000000
-SERVER_ARGS     = -c 16384 -ngl 999 -fa on --no-mmap
+MIN_MODEL_BYTES = 155000000000
+SERVER_ARGS     = -c 1048576 -ngl 999 -fa on --no-mmap -ctk q8_0 -ctv q8_0
 ```
 
-Total resident: 136.7 GB base + 5.5 GB draft = **142.2 GB** of 192 GB.
+Total resident: 161.9 GB weights + 10.9 GB draft + q8_0 KV at 1M ctx = **192.9 GB**
+of 206.1 GB, measured.
