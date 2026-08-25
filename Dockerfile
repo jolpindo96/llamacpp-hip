@@ -87,9 +87,14 @@ LABEL org.opencontainers.image.revision="${LLAMA_REF}" \
 
 # serve-bootstrap.sh needs: curl (health/probes), python3-venv (hf download),
 # openssh-server (RunPod exec), ca-certificates (HTTPS to HF/GHCR).
+# apt's openssh-server postinst generates SSH host keys at BUILD time. Baked into
+# a public image that means every pod boots with the same host keypair, whose
+# private half anyone can pull. They are deleted here; the RunPod start command
+# runs 'ssh-keygen -A' to generate fresh per-pod keys at boot.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates python3-venv openssh-server \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -f /etc/ssh/ssh_host_*
 
 COPY --from=build /opt/llama /opt/llama
 
