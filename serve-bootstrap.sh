@@ -73,11 +73,33 @@ fi
 
 # 2. Model shards (volume; datacenter-side pull, never the home uplink) ---------
 mkdir -p "$MODELS"
-if ! find "$MODELS" -name "*.gguf" -print -quit 2>/dev/null | grep -q .; then
+# A shard set is "complete" only if every shard the 00001-of-N name promises is
+# present. Checking mere presence is what bricked a pod: hf materialises each
+# shard as a real .gguf the moment it finishes, so an interrupted 162GB pull left
+# real .gguf files behind, the download was skipped on the next boot, and
+# llama-server got an incomplete shard set -> exit -> restart -> forever, with
+# sshd dying alongside the container so the pod could not be rescued.
+shards_complete() {
+    local dir="$1" first expected actual
+    first=$(find "$dir" -name "*00001-of-*.gguf" 2>/dev/null | sort | head -1)
+    if [ -z "$first" ]; then
+        # unsharded model: a single .gguf is complete on its own
+        find "$dir" -name "*.gguf" -print -quit 2>/dev/null | grep -q .
+        return $?
+    fi
+    expected=$(basename "$first" | sed -n "s/.*of-0*\([0-9][0-9]*\)\.gguf/\1/p")
+    [ -n "$expected" ] || return 1
+    actual=$(find "$dir" -name "*-of-*.gguf" 2>/dev/null | wc -l)
+    [ "$actual" -eq "$expected" ]
+}
+
+if ! shards_complete "$MODELS"; then
     python3 -m venv $WS/hfenv 2>/dev/null
     $WS/hfenv/bin/pip install -q -U "huggingface_hub[hf_transfer,cli]" || fail "pip hf"
+    # hf download resumes; re-running on a partial set is safe and cheap.
     HF_HUB_ENABLE_HF_TRANSFER=1 $WS/hfenv/bin/hf download "$MODEL_REPO" \
         --include "$MODEL_GLOB" --local-dir "$MODELS" || fail "model download"
+    shards_complete "$MODELS" || fail "shard set still incomplete after download"
 fi
 # Shootout lesson: success codes lie - verify sizes, not exit codes.
 TOTAL=$(du -sb "$MODELS" | cut -f1)
@@ -96,7 +118,7 @@ MAIN=$(find "$MODELS" -name "*00001-of*.gguf" | sort | head -1)
 DRAFT_FLAG=""
 if [ -n "$DRAFT_REPO" ]; then
     mkdir -p $WS/draft
-    find $WS/draft -name "*.gguf" -print -quit 2>/dev/null | grep -q . || \
+    shards_complete "$WS/draft" || \
         HF_HUB_ENABLE_HF_TRANSFER=1 $WS/hfenv/bin/hf download \
         "$DRAFT_REPO" --include "$DRAFT_GLOB" --local-dir $WS/draft || fail "draft download"
     DRAFT_FLAG="--spec-draft-model $(find $WS/draft -name '*.gguf' | sort | head -1) --spec-draft-n-max 4"
