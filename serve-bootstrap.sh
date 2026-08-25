@@ -19,6 +19,7 @@ MODELS=$WS/models
 LLAMA_REF="${LLAMACPP_REF:-}"                     # unset => use baked binaries
 MODEL_REPO="${MODEL_REPO:?set MODEL_REPO env}"
 MODEL_GLOB="${MODEL_GLOB:-*Q8_0*.gguf}"
+DRAFT_GLOB="${DRAFT_GLOB:-*.gguf}"                # which draft quant to fetch
 DRAFT_REPO="${DRAFT_REPO:-}"                      # usually unnecessary; see note in §4
 SERVER_ARGS="${SERVER_ARGS:--c 16384 -ngl 999 -fa on --no-mmap}"
 # Was hardcoded at 100GB (Qwen-sized) and false-failed smaller models.
@@ -72,7 +73,7 @@ fi
 
 # 2. Model shards (volume; datacenter-side pull, never the home uplink) ---------
 mkdir -p "$MODELS"
-if ! ls "$MODELS"/*.gguf >/dev/null 2>&1; then
+if ! find "$MODELS" -name "*.gguf" -print -quit 2>/dev/null | grep -q .; then
     python3 -m venv $WS/hfenv 2>/dev/null
     $WS/hfenv/bin/pip install -q -U "huggingface_hub[hf_transfer,cli]" || fail "pip hf"
     HF_HUB_ENABLE_HF_TRANSFER=1 $WS/hfenv/bin/hf download "$MODEL_REPO" \
@@ -82,8 +83,11 @@ fi
 TOTAL=$(du -sb "$MODELS" | cut -f1)
 [ "$TOTAL" -gt "$MIN_MODEL_BYTES" ] \
     || fail "model dir only $TOTAL bytes (floor $MIN_MODEL_BYTES) - incomplete download"
-MAIN=$(ls "$MODELS" | grep -i "00001-of" | head -1)
-[ -n "$MAIN" ] || MAIN=$(ls "$MODELS"/*.gguf | head -1 | xargs basename)
+# unsloth publishes shards under a per-quant subdirectory (UD-IQ4_XS/...), so
+# these must recurse. MAIN is a full path, not a basename.
+MAIN=$(find "$MODELS" -name "*00001-of*.gguf" | sort | head -1)
+[ -n "$MAIN" ] || MAIN=$(find "$MODELS" -name "*.gguf" | sort | head -1)
+[ -n "$MAIN" ] || fail "no .gguf found under $MODELS"
 
 # 3. Optional explicit draft head ----------------------------------------------
 # Usually NOT needed: since #27005 / #26814 llama.cpp auto-detects the MTP draft
@@ -92,9 +96,10 @@ MAIN=$(ls "$MODELS" | grep -i "00001-of" | head -1)
 DRAFT_FLAG=""
 if [ -n "$DRAFT_REPO" ]; then
     mkdir -p $WS/draft
-    ls $WS/draft/*.gguf >/dev/null 2>&1 || HF_HUB_ENABLE_HF_TRANSFER=1 $WS/hfenv/bin/hf download \
-        "$DRAFT_REPO" --include "*.gguf" --local-dir $WS/draft || fail "draft download"
-    DRAFT_FLAG="--spec-draft-model $(ls $WS/draft/*.gguf | head -1) --spec-draft-n-max 4"
+    find $WS/draft -name "*.gguf" -print -quit 2>/dev/null | grep -q . || \
+        HF_HUB_ENABLE_HF_TRANSFER=1 $WS/hfenv/bin/hf download \
+        "$DRAFT_REPO" --include "$DRAFT_GLOB" --local-dir $WS/draft || fail "draft download"
+    DRAFT_FLAG="--spec-draft-model $(find $WS/draft -name '*.gguf' | sort | head -1) --spec-draft-n-max 4"
 fi
 
 # 4. Status + serve -------------------------------------------------------------
@@ -108,5 +113,5 @@ cat > $WS/STATUS.md <<EOF
 EOF
 echo "=== serving ($SOURCE @ ${ACTIVE_REV:0:9}) ==="
 exec "$BIN/llama-server" \
-  -m "$MODELS/$MAIN" $DRAFT_FLAG $SERVER_ARGS \
+  -m "$MAIN" $DRAFT_FLAG $SERVER_ARGS \
   --host 0.0.0.0 --port 8000 ${API_KEY:+--api-key "$API_KEY"}
