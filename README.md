@@ -275,3 +275,63 @@ SERVER_ARGS     = -c 1048576 -ngl 999 -fa on --no-mmap -ctk q8_0 -ctv q8_0
 
 Total resident: 161.9 GB weights + 10.9 GB draft + q8_0 KV at 1M ctx = **192.9 GB**
 of 206.1 GB, measured.
+
+## Pod gotchas
+
+Hard-won on 2026-08-25. None of these are obvious from the API surface.
+
+**`free` inside a RunPod container reports the host, not the pod.** It reads
+`/proc/meminfo`, which is not namespaced, so on a 1x MI300X pod it showed the whole
+8-GPU node — 2,267 GB total with 2,141 GB of page cache — none of which was the pod's
+to use. A 1/8 slice of that node is closer to ~283 GB, and the real figure is the
+cgroup limit:
+
+```
+cat /sys/fs/cgroup/memory.max                      # cgroup v2
+cat /sys/fs/cgroup/memory/memory.limit_in_bytes    # cgroup v1
+```
+
+The RunPod API does not expose system RAM anywhere: `get-gpu-type` returns only
+`memory: 192` (that is VRAM), and `get-pod`'s runtime gives `memory: {util: N}`, a
+percentage with no base. Measure it from inside, from the cgroup, or not at all.
+
+Two conclusions that leaned on the bad reading, corrected: offloading a large
+embedding table to host RAM has far less headroom than 2.2 TB implies, and fast model
+reloads across restarts were *not* explained by local page cache — most likely
+MooseFS-side caching on the storage cluster instead.
+
+**The SSH port changes on every restart.** Observed 24849 → 32017 → 20954 → 15488
+across four restarts of one pod. Re-read `ssh.direct.port` from `get-pod` every time;
+a stale port looks exactly like a dead container.
+
+**`update-pod` replaces the whole `env` map, it does not merge.** Omitting
+`PUBLIC_KEY` on an env update silently removes it, and the next restart appends an
+empty string to `authorized_keys` — locking SSH out of a pod you cannot otherwise
+reach. Always resend the complete map.
+
+**`update-pod` cannot change a pod's start command.** Only name, image, disk, volume,
+ports and env are mutable. Because the start command `exec`s `llama-server`, the
+weights are always resident and there is no way to run `llama-bench` on the same pod.
+Route configuration through env vars the baked bootstrap reads, not through args.
+
+**A bootstrap that exits takes sshd with it.** `fail()` ends the container, RunPod
+restarts it, and the loop repeats every ~16-32s — never staying up long enough for a
+port to be assigned. Both unrecoverable pods this session died this way. On failure
+the bootstrap should write `STATUS.md` and then `sleep infinity`, so the pod stays
+shellable and the fault can be fixed in place.
+
+## Not yet runnable: `qwen4_exp`
+
+`Qwen/Qwen3.8-Flash-Next` (2026-08, 125B total / 6B activated, plus a 51B n-gram
+embedding and a 4B MTP head) declares `architectures: ["Qwen4ExpForConditionalGeneration"]`,
+`model_type: qwen4_exp`. **llama.cpp does not register that architecture** — no hits in
+`src/llama-arch.cpp`, `conversion/`, or `gguf-py/`. The newest Qwen architectures at
+pin `6036c635e` are `QWEN35`, `QWEN35MOE` and `QWEN3NEXT`.
+
+The only GGUF repo that surfaced for it, `vcruz305/Qwen3.8-Flash-Next-GGUF`, contains
+**no `.gguf` files** — an empty placeholder. Qwen's own compatibility line names
+Transformers, vLLM, SGLang and TokenSpeed; llama.cpp is absent from it.
+
+Blocked on upstream support landing in mainline. When it does, the pin moves and this
+note comes out.
+
