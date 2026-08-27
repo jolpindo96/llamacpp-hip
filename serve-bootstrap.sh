@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 # llamacpp-serve bootstrap - one-click llama.cpp OpenAI endpoint on MI300X
-# v2: binaries ship BAKED in the image; the volume build is now an escape hatch.
+# v3: binaries AND the Qwen3.8-Flash-Next vision projector ship BAKED in the image;
+#     the volume build is an escape hatch.
 # Idempotent across stop/start. Durable state on /workspace only.
 # Log: /workspace/serve-bootstrap.log   Status: /workspace/STATUS.md
 # =============================================================================
@@ -26,6 +27,16 @@ SERVER_ARGS="${SERVER_ARGS:--c 16384 -ngl 999 -fa on --no-mmap}"
 MIN_MODEL_BYTES="${MIN_MODEL_BYTES:-100000000000}"
 
 fail(){ echo "FAILED: $1"; echo "FAILED: $1 ($(date -u))" > $WS/STATUS.md; exit 1; }
+
+# The hf CLI lives in a venv on the volume. It used to be created only inside the
+# model-download branch, so a cached model plus DRAFT_REPO/MMPROJ_REPO would call
+# a binary that was never installed. Idempotent; safe to call repeatedly.
+HF=$WS/hfenv/bin/hf
+ensure_hf(){
+    [ -x "$HF" ] && return 0
+    python3 -m venv $WS/hfenv 2>/dev/null
+    $WS/hfenv/bin/pip install -q -U "huggingface_hub[hf_transfer,cli]" || fail "pip hf"
+}
 
 BAKED_REV="$(cat $BAKED_REV_FILE 2>/dev/null || echo '')"
 
@@ -94,10 +105,9 @@ shards_complete() {
 }
 
 if ! shards_complete "$MODELS"; then
-    python3 -m venv $WS/hfenv 2>/dev/null
-    $WS/hfenv/bin/pip install -q -U "huggingface_hub[hf_transfer,cli]" || fail "pip hf"
+    ensure_hf
     # hf download resumes; re-running on a partial set is safe and cheap.
-    HF_HUB_ENABLE_HF_TRANSFER=1 $WS/hfenv/bin/hf download "$MODEL_REPO" \
+    HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download "$MODEL_REPO" \
         --include "$MODEL_GLOB" --local-dir "$MODELS" || fail "model download"
     shards_complete "$MODELS" || fail "shard set still incomplete after download"
 fi
@@ -118,10 +128,46 @@ MAIN=$(find "$MODELS" -name "*00001-of*.gguf" | sort | head -1)
 DRAFT_FLAG=""
 if [ -n "$DRAFT_REPO" ]; then
     mkdir -p $WS/draft
+    ensure_hf
     shards_complete "$WS/draft" || \
-        HF_HUB_ENABLE_HF_TRANSFER=1 $WS/hfenv/bin/hf download \
+        HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download \
         "$DRAFT_REPO" --include "$DRAFT_GLOB" --local-dir $WS/draft || fail "draft download"
     DRAFT_FLAG="--spec-draft-model $(find $WS/draft -name '*.gguf' | sort | head -1) --spec-draft-n-max 4"
+fi
+
+# 3b. Vision projector (mmproj) -------------------------------------------------
+# Qwen3.8-Flash-Next is a VLM, but the backbone GGUF does NOT carry the vision
+# tower - llama.cpp loads it separately via --mmproj. A BF16 projector for
+# Qwen3.8-Flash-Next is baked at $BAKED_MMPROJ (clip.projector_type
+# qwen3vl_merger, which llama.cpp already registers as PROJECTOR_TYPE_QWEN3VL).
+#
+# OPT-IN, defaulting to off: passing --mmproj to a text-only model such as
+# DeepSeek-V4-Flash would break that template, and both share this image.
+#   MMPROJ=baked     use the projector baked into the image
+#   MMPROJ=<path>    use an explicit file
+#   MMPROJ_REPO=...  download one (with MMPROJ_GLOB) to $WS/mmproj, overriding
+#                    the baked BF16 - the escape hatch if BF16 misbehaves.
+BAKED_MMPROJ=/opt/llama/mmproj/qwen38-flash-next-bf16.gguf
+MMPROJ="${MMPROJ:-}"
+MMPROJ_REPO="${MMPROJ_REPO:-}"
+MMPROJ_GLOB="${MMPROJ_GLOB:-*mmproj*.gguf}"
+MMPROJ_FLAG=""
+MMPROJ_PATH=""
+if [ -n "$MMPROJ_REPO" ]; then
+    ensure_hf
+    mkdir -p $WS/mmproj
+    find $WS/mmproj -name '*.gguf' -print -quit 2>/dev/null | grep -q . ||         HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download         "$MMPROJ_REPO" --include "$MMPROJ_GLOB" --local-dir $WS/mmproj || fail "mmproj download"
+    MMPROJ_PATH=$(find $WS/mmproj -name '*.gguf' | sort | head -1)
+elif [ "$MMPROJ" = "baked" ]; then
+    MMPROJ_PATH="$BAKED_MMPROJ"
+elif [ -n "$MMPROJ" ]; then
+    MMPROJ_PATH="$MMPROJ"
+fi
+if [ -n "$MMPROJ_PATH" ]; then
+    [ -s "$MMPROJ_PATH" ] || fail "mmproj missing or empty: $MMPROJ_PATH"
+    [ "$(head -c4 "$MMPROJ_PATH")" = "GGUF" ] || fail "mmproj is not a GGUF: $MMPROJ_PATH"
+    MMPROJ_FLAG="--mmproj $MMPROJ_PATH"
+    echo "vision projector: $MMPROJ_PATH ($(stat -c%s "$MMPROJ_PATH") bytes)"
 fi
 
 # 4. Status + serve -------------------------------------------------------------
@@ -131,9 +177,10 @@ cat > $WS/STATUS.md <<EOF
 - model: $MAIN ($TOTAL bytes, floor $MIN_MODEL_BYTES)
 - draft: ${DRAFT_REPO:-auto-detected from GGUF metadata if the model ships an MTP head}
 - endpoint: :8000 OpenAI-compatible | GPU: $(rocm-smi --showuniqueid 2>/dev/null | grep -o '0x[0-9a-f]*' | head -1)
-- args: $SERVER_ARGS $DRAFT_FLAG
+- vision: ${MMPROJ_PATH:-off (text-only; set MMPROJ=baked for Qwen3.8-Flash-Next)}
+- args: $SERVER_ARGS $DRAFT_FLAG $MMPROJ_FLAG
 EOF
 echo "=== serving ($SOURCE @ ${ACTIVE_REV:0:9}) ==="
 exec "$BIN/llama-server" \
-  -m "$MAIN" $DRAFT_FLAG $SERVER_ARGS \
+  -m "$MAIN" $DRAFT_FLAG $MMPROJ_FLAG $SERVER_ARGS \
   --host 0.0.0.0 --port 8000 ${API_KEY:+--api-key "$API_KEY"}

@@ -13,6 +13,40 @@
 ARG ROCM_TAG=7.14.0-full
 ARG BASE=rocm/dev-ubuntu-24.04:${ROCM_TAG}
 
+# --------------------------------------------------------------- assets stage
+# Vision projector for Qwen3.8-Flash-Next.
+#
+# The backbone GGUF does NOT contain the vision tower; llama.cpp serves vision
+# through a separate mmproj GGUF passed with --mmproj. Baking it removes a boot
+# dependency and guarantees the projector matches what was validated.
+#
+# Its own stage on purpose: this layer must NOT be invalidated when LLAMA_REF
+# changes, or every pin bump re-downloads 0.9GB.
+#
+# BF16 as requested. F16 is the conventional mmproj dtype and clip.cpp carries no
+# BF16-specific handling (it relies on generic ggml paths), so if the vision path
+# misbehaves, MMPROJ_REPO/MMPROJ_GLOB override this at boot without a rebuild.
+FROM ${BASE} AS assets
+
+ARG MMPROJ_URL=https://huggingface.co/AtomicChat/Qwen3.8-Flash-Next-GGUF/resolve/main/mmproj-Qwen3.8-Flash-Next-BF16.gguf
+ARG MMPROJ_SHA256=b115ede4c82c66393ed208015ad6ac9ec5094537051666be52a1d98e3f767344
+ARG MMPROJ_DEST=/opt/llama/mmproj/qwen38-flash-next-bf16.gguf
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verified by content, not by exit code (shootout lesson): checksum, GGUF magic,
+# and the projector type llama.cpp actually registers (PROJECTOR_TYPE_QWEN3VL).
+RUN set -eu; \
+    mkdir -p "$(dirname "${MMPROJ_DEST}")"; \
+    curl -fsSL --retry 5 --retry-delay 3 -o "${MMPROJ_DEST}" "${MMPROJ_URL}"; \
+    echo "${MMPROJ_SHA256}  ${MMPROJ_DEST}" | sha256sum -c -; \
+    [ "$(head -c4 "${MMPROJ_DEST}")" = "GGUF" ] || { echo "FAIL: not a GGUF"; exit 1; }; \
+    head -c 1048576 "${MMPROJ_DEST}" | grep -aqm1 qwen3vl_merger \
+        || { echo "FAIL: projector type is not qwen3vl_merger"; exit 1; }; \
+    echo "PASS: mmproj $(stat -c%s "${MMPROJ_DEST}") bytes, qwen3vl_merger"
+
 # ---------------------------------------------------------------- build stage
 FROM ${BASE} AS build
 
@@ -96,7 +130,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /etc/ssh/ssh_host_*
 
-COPY --from=build /opt/llama /opt/llama
+COPY --from=build  /opt/llama /opt/llama
+# Must follow the build COPY: that one writes the whole /opt/llama tree.
+COPY --from=assets /opt/llama/mmproj /opt/llama/mmproj
 
 # MANDATORY (shootout lesson): ROCm debs do not register their libs with the
 # dynamic linker. Without this the binaries build fine and fail at runtime with
@@ -112,7 +148,9 @@ ENV LLAMA_ARG_HOST=0.0.0.0
 
 # Verify the baked binary actually runs in the runtime image, rather than
 # trusting that COPY succeeded (shootout lesson: exit codes lie).
-RUN llama-server --version && llama-bench --help >/dev/null
+RUN llama-server --version \
+ && llama-bench --help >/dev/null \
+ && test -s /opt/llama/mmproj/qwen38-flash-next-bf16.gguf
 
 EXPOSE 8000
 CMD ["/usr/local/bin/serve-bootstrap.sh"]
