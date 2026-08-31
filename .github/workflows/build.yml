@@ -15,6 +15,11 @@ on:
         required: false
         default: false
         type: boolean
+      rocm_tag:
+        description: 'ROCm base image tag (default 7.14.0-full; e.g. 10.0.0-full)'
+        required: false
+        default: '7.14.0-full'
+        type: string
 
 permissions:
   contents: read
@@ -42,9 +47,22 @@ jobs:
           fi
           [ -n "$REF" ] || { echo "could not resolve LLAMA_REF"; exit 1; }
           OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          # A tag push carries no inputs, so it always builds the default ROCm.
+          # Only workflow_dispatch can select a variant.
+          ROCM_TAG="${{ inputs.rocm_tag }}"
+          ROCM_TAG="${ROCM_TAG:-7.14.0-full}"
+          # The image tag names the llama.cpp pin. A non-default ROCm gets a
+          # suffix so a variant can never overwrite the reference build.
+          if [ "$ROCM_TAG" = "7.14.0-full" ]; then
+            SUFFIX=""
+          else
+            SUFFIX="-rocm${ROCM_TAG%%.*}"          # 10.0.0-full -> -rocm10
+          fi
           echo "ref=$REF"                          >> "$GITHUB_OUTPUT"
+          echo "rocm_tag=$ROCM_TAG"                >> "$GITHUB_OUTPUT"
+          echo "tag=${REF}${SUFFIX}"               >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/$OWNER/llamacpp-hip" >> "$GITHUB_OUTPUT"
-          echo "Pinning llama.cpp @ $REF -> ghcr.io/$OWNER/llamacpp-hip:$REF"
+          echo "Pinning llama.cpp @ $REF on ROCm $ROCM_TAG -> ghcr.io/$OWNER/llamacpp-hip:${REF}${SUFFIX}"
 
       # The ROCm dev base is ~8GB compressed and the build tree adds several more;
       # a stock runner does not have room. Same action and settings upstream
@@ -81,10 +99,11 @@ jobs:
           provenance: false
           build-args: |
             LLAMA_REF=${{ steps.vars.outputs.ref }}
+            ROCM_TAG=${{ steps.vars.outputs.rocm_tag }}
           # :latest is opt-in only. Pinned tags are the product; a moving
           # :latest would defeat the reproducibility the pin exists for.
           tags: |
-            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.ref }}
+            ${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}
             ${{ (github.event_name == 'workflow_dispatch' && inputs.push_latest) && format('{0}:latest', steps.vars.outputs.image) || '' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -95,8 +114,10 @@ jobs:
             echo "### Image published"
             echo ""
             echo '```'
-            echo "${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.ref }}"
+            echo "${{ steps.vars.outputs.image }}:${{ steps.vars.outputs.tag }}"
             echo '```'
             echo ""
             echo "llama.cpp pin: \`${{ steps.vars.outputs.ref }}\`"
+            echo ""
+            echo "ROCm base: \`${{ steps.vars.outputs.rocm_tag }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
