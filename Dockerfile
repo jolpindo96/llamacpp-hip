@@ -114,10 +114,12 @@ RUN set -eu; \
 FROM ${BASE} AS runtime
 
 ARG LLAMA_REF
+ARG GPU_TARGETS=gfx942
 LABEL org.opencontainers.image.revision="${LLAMA_REF}" \
+      com.jolpindo.hip.targets="${GPU_TARGETS}" \
       org.opencontainers.image.source="https://github.com/ggml-org/llama.cpp" \
       org.opencontainers.image.title="llamacpp-hip" \
-      org.opencontainers.image.description="Pinned llama.cpp HIP (gfx942) server image for RunPod MI300X"
+      org.opencontainers.image.description="Pinned llama.cpp HIP server image (targets: ${GPU_TARGETS})"
 
 # serve-bootstrap.sh needs: curl (health/probes), python3-venv (hf download),
 # openssh-server (RunPod exec), ca-certificates (HTTPS to HF/GHCR).
