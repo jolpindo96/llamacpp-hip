@@ -117,6 +117,12 @@ hardcoded Qwen-sized constant that false-failed smaller models.
   would have crash-looped only after a 170 GB download. The image build runs the same
   check on the defaults (`serve-bootstrap.sh --check-args`), so a pin that drops a
   flag the bootstrap passes fails CI instead of every pod.
+- **Deprecated flags fail the build and are reported at boot.** `--no-mmap` printed
+  `DEPRECATED: ... use --load-mode ...` on every boot for seven weeks (from
+  `e6dd0e29a`, 2026-07-23) before it was deleted. `--check-args` now fails on any
+  `DEPRECATED` warning. At boot a deprecated flag in `SERVER_ARGS` still serves, since it
+  works, but it is logged and listed under *flag warnings* in `STATUS.md`, so the
+  template gets fixed before the flag disappears.
 - **A failure never exits.** `fail()` writes the reason and the last log lines to
   `STATUS.md` and sleeps, so the pod stays up for SSH. It bills until stopped.
 - **`llama-server` is supervised, not `exec`'d.** An exit before `/health` ever
@@ -142,6 +148,10 @@ is `draft-dspark`; `common/arg.cpp:566` at `26394b4e6`). An MTP head embedded in
 main GGUF is **not** inferred: `--spec-type` defaults to `none`, so put
 `--spec-type draft-mtp --spec-draft-n-max 1` in `SERVER_ARGS`. An earlier revision of
 this file said the embedded head was auto-detected; at the current pins it is not.
+
+**On downloads:** `hf download` goes through Xet; set `HF_XET_HIGH_PERFORMANCE=1` in a
+template, not `HF_HUB_ENABLE_HF_TRANSFER`, which huggingface_hub 1.x ignores with a
+deprecation warning (its `[hf_transfer,cli]` extras are gone too).
 
 ## DSpark / MTP
 
@@ -303,8 +313,23 @@ export it, `ggml-org` does (same `dflash` layout and `block_size = 5` as 0731's)
 
 Measured on the 0731 configuration it replaced (`unsloth/DeepSeek-V4-Flash-0731-GGUF`
 model and in-repo `Q8_0` drafter): 161.9 GB weights + 10.9 GB draft + q8_0 KV at 1M
-ctx = **192.9 GB** of 206.1 GB. Vision-Exp adds the 0.93 GB projector and its
-compute buffer, not yet measured.
+ctx = **192.9 GB** of 206.1 GB.
+
+### Measured on MI350X, 2026-09-23
+
+Vision-Exp on `26394b4e6-multi-rocm10-r2`, one RunPod MI350X (gfx950), same flags,
+greedy, 1M context:
+
+| Config | VRAM | Text (thinking) | Image question | Text after image |
+|---|---|---|---|---|
+| + DSpark BF16 drafter (`5uquc0hlu9`) | 193.98 GB | 65.2 tok/s, 54.0% accepted | 65.8 tok/s, 68.9% | 58.8 tok/s, 44.1% |
+| no drafter (`v8o48lc1sn`) | 182.12 GB | 34.9 tok/s | 33.3 tok/s | 34.9 tok/s |
+
+The drafter is worth 1.7–2.0x for 11.9 GB, and both configs answered the image test
+(a blue square top-left, a red circle lower-right) correctly and identically. 193.98 GB
+also fits an MI300X's 206.1 GB. From an empty pod to `/health`: 2 min 11 s, including
+the 174 GB download. The log warns that the CLIP graph uses operators the backend does
+not support, so part of the vision encoder runs off the GPU.
 
 ## Pod gotchas
 

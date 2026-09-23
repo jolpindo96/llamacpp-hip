@@ -16,19 +16,27 @@ SERVER_ARGS="${SERVER_ARGS:--c 16384 -ngl 999 -fa on --load-mode none}"
 # all arguments are parsed, then --help prints usage and exits 0. A removed flag
 # exits 1 instead - upstream deleted --no-mmap outright in 14a9d09f7, and a stale
 # flag used to surface only after a 100+ GB download, as a crash loop. Parsing
-# opens no files, so /dev/null stands in for paths. $2=all adds every optional flag.
+# opens no files, so /dev/null stands in for paths. $2=all adds every optional flag
+# and also fails on a DEPRECATED warning: --no-mmap printed one for seven weeks
+# before it was deleted, so the image build treats deprecation as removal.
+# Otherwise a deprecation is only reported, and the pod still serves.
 args_ok(){
-    local draft="" mmproj="" out
+    local draft="" mmproj="" out dep
     if [ -n "${DRAFT_REPO:-}" ] || [ "${2:-}" = all ]; then
         draft="--spec-draft-model /dev/null --spec-draft-n-max 4"
     fi
     if [ -n "${MMPROJ_REPO:-}${MMPROJ:-}" ] || [ "${2:-}" = all ]; then
         mmproj="--mmproj /dev/null"
     fi
-    out=$("$1/llama-server" -m /dev/null $draft $mmproj $SERVER_ARGS \
-          --host 0.0.0.0 --port 8000 ${API_KEY:+--api-key x} --help 2>&1 >/dev/null) && return 0
-    echo "llama-server in $1 rejected the flags: $(printf '%s\n' "$out" | grep -m1 '^error' || printf '%s\n' "$out" | tail -n1)"
-    return 1
+    if ! out=$("$1/llama-server" -m /dev/null $draft $mmproj $SERVER_ARGS \
+              --host 0.0.0.0 --port 8000 ${API_KEY:+--api-key x} --help 2>&1 >/dev/null); then
+        echo "llama-server in $1 rejected the flags: $(printf '%s\n' "$out" | grep -m1 '^error' || printf '%s\n' "$out" | tail -n1)"
+        return 1
+    fi
+    dep=$(printf '%s\n' "$out" | grep -m1 'DEPRECATED' | sed 's/.*DEPRECATED/DEPRECATED/')
+    [ -z "$dep" ] && return 0
+    echo "llama-server in $1 warns about the flags: $dep"
+    [ "${2:-}" != all ]
 }
 
 # The image build runs this against the baked binary, so a pin that drops a flag
@@ -72,7 +80,9 @@ HF=$WS/hfenv/bin/hf
 ensure_hf(){
     [ -x "$HF" ] && return 0
     python3 -m venv $WS/hfenv 2>/dev/null
-    $WS/hfenv/bin/pip install -q -U "huggingface_hub[hf_transfer,cli]" || fail "pip hf"
+    # huggingface_hub 1.x ships the hf CLI and the Xet transfer backend itself;
+    # the old [hf_transfer,cli] extras no longer exist.
+    $WS/hfenv/bin/pip install -q -U huggingface_hub || fail "pip hf"
 }
 
 BAKED_REV="$(cat $BAKED_REV_FILE 2>/dev/null || echo '')"
@@ -120,8 +130,9 @@ else
 fi
 
 # 1b. Parse every flag against these binaries before any download --------------
-REASON=$(args_ok "$BIN") || fail "$REASON"
+FLAG_WARNING=$(args_ok "$BIN") || fail "$FLAG_WARNING"
 echo "flags parse on this llama-server: $SERVER_ARGS"
+[ -z "$FLAG_WARNING" ] || echo "WARNING: $FLAG_WARNING"
 
 # 2. Model shards (volume; datacenter-side pull, never the home uplink) ---------
 mkdir -p "$MODELS"
@@ -148,7 +159,7 @@ shards_complete() {
 if ! shards_complete "$MODELS"; then
     ensure_hf
     # hf download resumes; re-running on a partial set is safe and cheap.
-    HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download "$MODEL_REPO" \
+    HF_XET_HIGH_PERFORMANCE=1 "$HF" download "$MODEL_REPO" \
         --include "$MODEL_GLOB" --local-dir "$MODELS" || fail "model download"
     shards_complete "$MODELS" || fail "shard set still incomplete after download"
 fi
@@ -172,7 +183,7 @@ if [ -n "$DRAFT_REPO" ]; then
     mkdir -p $WS/draft
     ensure_hf
     shards_complete "$WS/draft" || \
-        HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download \
+        HF_XET_HIGH_PERFORMANCE=1 "$HF" download \
         "$DRAFT_REPO" --include "$DRAFT_GLOB" --local-dir $WS/draft || fail "draft download"
     DRAFT_FLAG="--spec-draft-model $(find $WS/draft -name '*.gguf' | sort | head -1) --spec-draft-n-max 4"
 fi
@@ -199,7 +210,7 @@ if [ -n "$MMPROJ_REPO" ]; then
     ensure_hf
     mkdir -p $WS/mmproj
     find $WS/mmproj -name '*.gguf' -print -quit 2>/dev/null | grep -q . || \
-        HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download \
+        HF_XET_HIGH_PERFORMANCE=1 "$HF" download \
         "$MMPROJ_REPO" --include "$MMPROJ_GLOB" --local-dir $WS/mmproj || fail "mmproj download"
     MMPROJ_PATH=$(find $WS/mmproj -name '*.gguf' | sort | head -1)
 elif [ "$MMPROJ" = "baked" ]; then
@@ -224,6 +235,7 @@ cat > $WS/STATUS.md <<EOF
 - endpoint: :8000 OpenAI-compatible | GPU: $(rocm-smi --showuniqueid 2>/dev/null | grep -o '0x[0-9a-f]*' | head -1)
 - vision: ${MMPROJ_PATH:-off (text-only; set MMPROJ=baked for Qwen3.8-Flash-Next)}
 - args: $SERVER_ARGS $DRAFT_FLAG $MMPROJ_FLAG
+- flag warnings: ${FLAG_WARNING:-none}
 EOF
 }
 status STARTING
