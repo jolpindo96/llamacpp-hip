@@ -1,17 +1,43 @@
 #!/usr/bin/env bash
 # =============================================================================
 # llamacpp-serve bootstrap - one-click llama.cpp OpenAI endpoint on MI300X
-# v3: binaries AND the Qwen3.8-Flash-Next vision projector ship BAKED in the image;
-#     the volume build is an escape hatch.
+# v4: binaries AND the Qwen3.8-Flash-Next vision projector ship BAKED in the image;
+#     the volume build is an escape hatch. Flags are parsed before any download,
+#     and a failure leaves the pod up with STATUS.md instead of a restart loop.
 # Idempotent across stop/start. Durable state on /workspace only.
 # Log: /workspace/serve-bootstrap.log   Status: /workspace/STATUS.md
 # =============================================================================
 set -u
 WS=/workspace
+BAKED_BIN=/opt/llama/bin
+SERVER_ARGS="${SERVER_ARGS:--c 16384 -ngl 999 -fa on --load-mode none}"
+
+# Parse-only check of every flag this script will pass, against one llama-server:
+# all arguments are parsed, then --help prints usage and exits 0. A removed flag
+# exits 1 instead - upstream deleted --no-mmap outright in 14a9d09f7, and a stale
+# flag used to surface only after a 100+ GB download, as a crash loop. Parsing
+# opens no files, so /dev/null stands in for paths. $2=all adds every optional flag.
+args_ok(){
+    local draft="" mmproj="" out
+    if [ -n "${DRAFT_REPO:-}" ] || [ "${2:-}" = all ]; then
+        draft="--spec-draft-model /dev/null --spec-draft-n-max 4"
+    fi
+    if [ -n "${MMPROJ_REPO:-}${MMPROJ:-}" ] || [ "${2:-}" = all ]; then
+        mmproj="--mmproj /dev/null"
+    fi
+    out=$("$1/llama-server" -m /dev/null $draft $mmproj $SERVER_ARGS \
+          --host 0.0.0.0 --port 8000 ${API_KEY:+--api-key x} --help 2>&1 >/dev/null) && return 0
+    echo "llama-server in $1 rejected the flags: $(printf '%s\n' "$out" | grep -m1 '^error' || printf '%s\n' "$out" | tail -n1)"
+    return 1
+}
+
+# The image build runs this against the baked binary, so a pin that drops a flag
+# this script passes fails the build instead of every pod.
+if [ "${1:-}" = "--check-args" ]; then args_ok "$BAKED_BIN" all; exit $?; fi
+
 exec >>"$WS/serve-bootstrap.log" 2>&1
 echo "=== bootstrap start: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
-BAKED_BIN=/opt/llama/bin
 BAKED_REV_FILE=/opt/llama/REVISION
 LLAMA_DIR=$WS/llama.cpp
 VOL_BIN=$LLAMA_DIR/build/bin
@@ -21,12 +47,23 @@ LLAMA_REF="${LLAMACPP_REF:-}"                     # unset => use baked binaries
 MODEL_REPO="${MODEL_REPO:?set MODEL_REPO env}"
 MODEL_GLOB="${MODEL_GLOB:-*Q8_0*.gguf}"
 DRAFT_GLOB="${DRAFT_GLOB:-*.gguf}"                # which draft quant to fetch
-DRAFT_REPO="${DRAFT_REPO:-}"                      # usually unnecessary; see note in §4
-SERVER_ARGS="${SERVER_ARGS:--c 16384 -ngl 999 -fa on --no-mmap}"
+DRAFT_REPO="${DRAFT_REPO:-}"                      # a separate draft model; see §3
 # Was hardcoded at 100GB (Qwen-sized) and false-failed smaller models.
 MIN_MODEL_BYTES="${MIN_MODEL_BYTES:-100000000000}"
 
-fail(){ echo "FAILED: $1"; echo "FAILED: $1 ($(date -u))" > $WS/STATUS.md; exit 1; }
+# Never exit: the start command execs this script, so an exit ends the container,
+# takes sshd with it, and RunPod restarts it forever with nothing left to read.
+# Record why in STATUS.md, keep the pod up for SSH, and let a stop end it.
+fail(){
+    echo "FAILED: $1"
+    { echo "# FAILED ($(date -u +%Y-%m-%dT%H:%M:%SZ))"; echo; echo "$1"; echo
+      echo "The pod stays up for SSH and bills until stopped. Last log lines:"
+      echo '```'; tail -n 20 "$WS/serve-bootstrap.log"; echo '```'
+    } > $WS/STATUS.md
+    trap 'exit 0' TERM INT
+    sleep infinity & wait $!
+    exit 1
+}
 
 # The hf CLI lives in a venv on the volume. It used to be created only inside the
 # model-download branch, so a cached model plus DRAFT_REPO/MMPROJ_REPO would call
@@ -82,6 +119,10 @@ else
     SOURCE="volume build (fresh)"
 fi
 
+# 1b. Parse every flag against these binaries before any download --------------
+REASON=$(args_ok "$BIN") || fail "$REASON"
+echo "flags parse on this llama-server: $SERVER_ARGS"
+
 # 2. Model shards (volume; datacenter-side pull, never the home uplink) ---------
 mkdir -p "$MODELS"
 # A shard set is "complete" only if every shard the 00001-of-N name promises is
@@ -121,10 +162,11 @@ MAIN=$(find "$MODELS" -name "*00001-of*.gguf" | sort | head -1)
 [ -n "$MAIN" ] || MAIN=$(find "$MODELS" -name "*.gguf" | sort | head -1)
 [ -n "$MAIN" ] || fail "no .gguf found under $MODELS"
 
-# 3. Optional explicit draft head ----------------------------------------------
-# Usually NOT needed: since #27005 / #26814 llama.cpp auto-detects the MTP draft
-# type from GGUF metadata, and #26458 resolves the DSpark sidecar. Set DRAFT_REPO
-# only to override with a separate (e.g. Q4) draft.
+# 3. Optional separate draft model ----------------------------------------------
+# A draft file passed here needs no --spec-type: llama.cpp infers it from the
+# file's own GGUF metadata (dflash + markov head => draft-dspark). An MTP head
+# embedded in the MAIN GGUF is not inferred - --spec-type defaults to none - so
+# put --spec-type draft-mtp (and --spec-draft-n-max) in SERVER_ARGS instead.
 DRAFT_FLAG=""
 if [ -n "$DRAFT_REPO" ]; then
     mkdir -p $WS/draft
@@ -156,7 +198,9 @@ MMPROJ_PATH=""
 if [ -n "$MMPROJ_REPO" ]; then
     ensure_hf
     mkdir -p $WS/mmproj
-    find $WS/mmproj -name '*.gguf' -print -quit 2>/dev/null | grep -q . ||         HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download         "$MMPROJ_REPO" --include "$MMPROJ_GLOB" --local-dir $WS/mmproj || fail "mmproj download"
+    find $WS/mmproj -name '*.gguf' -print -quit 2>/dev/null | grep -q . || \
+        HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download \
+        "$MMPROJ_REPO" --include "$MMPROJ_GLOB" --local-dir $WS/mmproj || fail "mmproj download"
     MMPROJ_PATH=$(find $WS/mmproj -name '*.gguf' | sort | head -1)
 elif [ "$MMPROJ" = "baked" ]; then
     MMPROJ_PATH="$BAKED_MMPROJ"
@@ -171,16 +215,37 @@ if [ -n "$MMPROJ_PATH" ]; then
 fi
 
 # 4. Status + serve -------------------------------------------------------------
+status(){ # $1 = STARTING, then READY once /health answers
 cat > $WS/STATUS.md <<EOF
-# READY ($(date -u +%Y-%m-%dT%H:%M:%SZ))
+# $1 ($(date -u +%Y-%m-%dT%H:%M:%SZ))
 - binaries: $SOURCE @ ${ACTIVE_REV:0:9}  (baked image rev: ${BAKED_REV:0:9})
 - model: $MAIN ($TOTAL bytes, floor $MIN_MODEL_BYTES)
-- draft: ${DRAFT_REPO:-auto-detected from GGUF metadata if the model ships an MTP head}
+- draft: ${DRAFT_REPO:-none separate (an MTP head in the model needs --spec-type draft-mtp in args)}
 - endpoint: :8000 OpenAI-compatible | GPU: $(rocm-smi --showuniqueid 2>/dev/null | grep -o '0x[0-9a-f]*' | head -1)
 - vision: ${MMPROJ_PATH:-off (text-only; set MMPROJ=baked for Qwen3.8-Flash-Next)}
 - args: $SERVER_ARGS $DRAFT_FLAG $MMPROJ_FLAG
 EOF
+}
+status STARTING
 echo "=== serving ($SOURCE @ ${ACTIVE_REV:0:9}) ==="
-exec "$BIN/llama-server" \
+# Supervised, not exec'd. As PID 1, any llama-server exit - an OOM at load, a model
+# it cannot read - ended the container into a restart loop. Now an exit before
+# /health ever answers is a config fault (fail: STATUS.md, pod stays up); an exit
+# after serving is a runtime fault, so exit and let RunPod restart it as before.
+# /health is public even with --api-key.
+"$BIN/llama-server" \
   -m "$MAIN" $DRAFT_FLAG $MMPROJ_FLAG $SERVER_ARGS \
-  --host 0.0.0.0 --port 8000 ${API_KEY:+--api-key "$API_KEY"}
+  --host 0.0.0.0 --port 8000 ${API_KEY:+--api-key "$API_KEY"} &
+SRV=$!
+trap 'kill -TERM $SRV 2>/dev/null; wait $SRV; exit 0' TERM INT
+SERVED=0
+while kill -0 $SRV 2>/dev/null; do
+    if curl -sf -o /dev/null http://127.0.0.1:8000/health; then
+        SERVED=1; status READY; echo "=== /health answered ==="; break
+    fi
+    sleep 5
+done
+wait $SRV; RC=$?
+[ "$SERVED" = 1 ] || fail "llama-server exited with code $RC before /health ever answered"
+echo "llama-server exited with code $RC after serving; exiting so RunPod restarts the pod"
+exit $RC

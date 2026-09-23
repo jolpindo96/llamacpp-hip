@@ -149,10 +149,13 @@ ENV PATH=/opt/llama/bin:${PATH}
 ENV LLAMA_ARG_HOST=0.0.0.0
 
 # Verify the baked binary actually runs in the runtime image, rather than
-# trusting that COPY succeeded (shootout lesson: exit codes lie).
+# trusting that COPY succeeded (shootout lesson: exit codes lie), and that it
+# still parses every flag the bootstrap passes - a pin that drops one (as
+# 14a9d09f7 dropped --no-mmap) fails here instead of in every pod.
 RUN llama-server --version \
  && llama-bench --help >/dev/null \
- && test -s /opt/llama/mmproj/qwen38-flash-next-bf16.gguf
+ && test -s /opt/llama/mmproj/qwen38-flash-next-bf16.gguf \
+ && /usr/local/bin/serve-bootstrap.sh --check-args
 
 EXPOSE 8000
 CMD ["/usr/local/bin/serve-bootstrap.sh"]

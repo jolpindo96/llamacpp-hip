@@ -88,8 +88,11 @@ same `.cu` sources through `ggml-hip/CMakeLists.txt`, which never sets those fla
   The previous bootstrap used `.../rocm/apt/latest`, which was unpinned; baking
   removes that code path entirely.
 - **Auth is the built-in `GITHUB_TOKEN`** with `packages: write`. No PATs.
-- Single-target `gfx942`. Multi-target (`gfx90a;gfx942;gfx1201`) multiplies compile
-  time and is a stretch goal only once this is green.
+- A tag push builds single-target `gfx942` on ROCm 7.14. `workflow_dispatch` selects
+  variants: `gpu_targets='gfx942;gfx950'` → `-multi`, `rocm_tag=10.0.0-full` → `-rocm10`.
+- **Rebuilding without a pin change** (e.g. a bootstrap fix): add `image_rev=r2` →
+  `:<ref>-multi-rocm10-r2`. A new tag rather than an overwrite, so a host that cached
+  the old image cannot keep serving it.
 
 ## serve-bootstrap.sh
 
@@ -106,6 +109,21 @@ the volume, which silently ignored `LLAMACPP_REF` on a reused volume.
 The model-size sanity floor is now `MIN_MODEL_BYTES` (default 100 GB) instead of a
 hardcoded Qwen-sized constant that false-failed smaller models.
 
+### Failure behaviour
+
+- **Flags are parsed before any download.** `llama-server <flags> --help` parses every
+  flag and exits 0; a removed one exits 1. llama.cpp deleted `--no-mmap` in
+  `14a9d09f7` (2026-09-09) with no deprecation stub, and templates still carrying it
+  would have crash-looped only after a 170 GB download. The image build runs the same
+  check on the defaults (`serve-bootstrap.sh --check-args`), so a pin that drops a
+  flag the bootstrap passes fails CI instead of every pod.
+- **A failure never exits.** `fail()` writes the reason and the last log lines to
+  `STATUS.md` and sleeps, so the pod stays up for SSH. It bills until stopped.
+- **`llama-server` is supervised, not `exec`'d.** An exit before `/health` ever
+  answers is a config fault and goes to `fail()`. An exit after serving is a runtime
+  fault: the bootstrap exits too and RunPod restarts the container, as before.
+  `STATUS.md` reads `STARTING`, then `READY` once `/health` answers.
+
 ### Environment
 
 | Var | Default | Notes |
@@ -113,15 +131,17 @@ hardcoded Qwen-sized constant that false-failed smaller models.
 | `MODEL_REPO` | *(required)* | HF repo id |
 | `MODEL_GLOB` | `*Q8_0*.gguf` | shard filter |
 | `LLAMACPP_REF` | *(unset)* | unset ⇒ use baked binaries |
-| `SERVER_ARGS` | `-c 16384 -ngl 999 -fa on --no-mmap` | |
+| `SERVER_ARGS` | `-c 16384 -ngl 999 -fa on --load-mode none` | parsed before any download |
 | `MIN_MODEL_BYTES` | `100000000000` | download sanity floor |
 | `DRAFT_REPO` | *(unset)* | usually unnecessary — see below |
 | `API_KEY` | *(unset)* | sets `--api-key` |
 
-**On draft models:** since #27005 and #26814 llama.cpp auto-detects the MTP draft
-type from GGUF metadata, and #26458 resolves the DSpark sidecar. If the model ships
-its own MTP head, leave `DRAFT_REPO` unset and let llama.cpp find it. Set it only to
-override with a separate (e.g. Q4) draft.
+**On draft models:** a separate draft file (`DRAFT_REPO`) needs no `--spec-type`;
+llama.cpp infers it from that file's own GGUF metadata (`dflash` with a Markov head
+is `draft-dspark`; `common/arg.cpp:566` at `26394b4e6`). An MTP head embedded in the
+main GGUF is **not** inferred: `--spec-type` defaults to `none`, so put
+`--spec-type draft-mtp --spec-draft-n-max 1` in `SERVER_ARGS`. An earlier revision of
+this file said the embedded head was auto-detected; at the current pins it is not.
 
 ## DSpark / MTP
 
@@ -263,18 +283,28 @@ independent of that checkout.
 
 ### Template environment
 
+Current (`5uquc0hlu9`, since 2026-09-23 - the multimodal Vision-Exp model):
+
 ```
-MODEL_REPO      = unsloth/DeepSeek-V4-Flash-0731-GGUF
+MODEL_REPO      = unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF
 MODEL_GLOB      = *UD-Q8_K_XL*
-DRAFT_REPO      = unsloth/DeepSeek-V4-Flash-0731-GGUF
-DRAFT_GLOB      = *dspark*Q8_0*
+DRAFT_REPO      = ggml-org/DeepSeek-V4-Flash-Vision-Exp-GGUF
+DRAFT_GLOB      = dspark-DeepSeek-V4-Flash-Vision-Exp-BF16.gguf
+MMPROJ_REPO     = unsloth/DeepSeek-V4-Flash-Vision-Exp-GGUF
+MMPROJ_GLOB     = mmproj-BF16.gguf
 LLAMACPP_REF    = (unset - use baked binaries)
 MIN_MODEL_BYTES = 155000000000
-SERVER_ARGS     = -c 1048576 -ngl 999 -fa on --no-mmap -ctk q8_0 -ctv q8_0
+SERVER_ARGS     = -c 1048576 -ngl 999 -fa on --load-mode none -ctk q8_0 -ctv q8_0
 ```
 
-Total resident: 161.9 GB weights + 10.9 GB draft + q8_0 KV at 1M ctx = **192.9 GB**
-of 206.1 GB, measured.
+Vision-Exp had continued training, so it needs its own drafter, not 0731's. DeepSeek
+ships that drafter inside the main checkpoint; unsloth's Vision-Exp repo does not
+export it, `ggml-org` does (same `dflash` layout and `block_size = 5` as 0731's).
+
+Measured on the 0731 configuration it replaced (`unsloth/DeepSeek-V4-Flash-0731-GGUF`
+model and in-repo `Q8_0` drafter): 161.9 GB weights + 10.9 GB draft + q8_0 KV at 1M
+ctx = **192.9 GB** of 206.1 GB. Vision-Exp adds the 0.93 GB projector and its
+compute buffer, not yet measured.
 
 ## Pod gotchas
 
@@ -309,16 +339,14 @@ a stale port looks exactly like a dead container.
 empty string to `authorized_keys` — locking SSH out of a pod you cannot otherwise
 reach. Always resend the complete map.
 
-**`update-pod` cannot change a pod's start command.** Only name, image, disk, volume,
-ports and env are mutable. Because the start command `exec`s `llama-server`, the
-weights are always resident and there is no way to run `llama-bench` on the same pod.
-Route configuration through env vars the baked bootstrap reads, not through args.
+**`update-pod` could not change a pod's start command** on 2026-08-25 (the API has
+accepted `args` since 2026-09-14). Route configuration through env vars the baked
+bootstrap reads anyway: the template's start command stays the same for every model.
 
-**A bootstrap that exits takes sshd with it.** `fail()` ends the container, RunPod
-restarts it, and the loop repeats every ~16-32s — never staying up long enough for a
-port to be assigned. Both unrecoverable pods this session died this way. On failure
-the bootstrap should write `STATUS.md` and then `sleep infinity`, so the pod stays
-shellable and the fault can be fixed in place.
+**A bootstrap that exits takes sshd with it.** The old `fail()` ended the container,
+RunPod restarted it, and the loop repeated every ~16-32s — never staying up long
+enough for a port to be assigned. Both unrecoverable pods this session died this way.
+Fixed since 2026-09-23: see *Failure behaviour* above.
 
 ## Not yet runnable: `qwen4_exp`
 

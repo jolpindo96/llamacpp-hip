@@ -25,6 +25,11 @@ on:
         required: false
         default: 'gfx942'
         type: string
+      image_rev:
+        description: 'Tag suffix for a rebuild that changes the image but not the pin (e.g. r2)'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -73,12 +78,21 @@ jobs:
             *\;*) ARCH_SUFFIX="-multi" ;;
             *)       ARCH_SUFFIX="-${GPU_TARGETS}" ;;
           esac
+          # Same pin, changed image (e.g. a bootstrap fix): a new tag rather than an
+          # overwrite, so a host that cached the old image cannot keep serving it.
+          IMAGE_REV="${{ inputs.image_rev }}"
+          case "$IMAGE_REV" in
+            '')           REV_SUFFIX="" ;;
+            *[!a-z0-9.]*) echo "image_rev must match [a-z0-9.]+, got '$IMAGE_REV'"; exit 1 ;;
+            *)            REV_SUFFIX="-${IMAGE_REV}" ;;
+          esac
+          TAG="${REF}${ARCH_SUFFIX}${ROCM_SUFFIX}${REV_SUFFIX}"
           echo "ref=$REF"                          >> "$GITHUB_OUTPUT"
           echo "rocm_tag=$ROCM_TAG"                >> "$GITHUB_OUTPUT"
           echo "gpu_targets=$GPU_TARGETS"          >> "$GITHUB_OUTPUT"
-          echo "tag=${REF}${ARCH_SUFFIX}${ROCM_SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"                          >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/$OWNER/llamacpp-hip" >> "$GITHUB_OUTPUT"
-          echo "Pinning llama.cpp @ $REF | ROCm $ROCM_TAG | arch $GPU_TARGETS -> ghcr.io/$OWNER/llamacpp-hip:${REF}${ARCH_SUFFIX}${ROCM_SUFFIX}"
+          echo "Pinning llama.cpp @ $REF | ROCm $ROCM_TAG | arch $GPU_TARGETS -> ghcr.io/$OWNER/llamacpp-hip:$TAG"
 
       # The ROCm dev base is ~8GB compressed and the build tree adds several more;
       # a stock runner does not have room. Same action and settings upstream
