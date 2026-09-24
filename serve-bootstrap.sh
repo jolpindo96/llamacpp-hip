@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# llamacpp-serve bootstrap - one-click llama.cpp OpenAI endpoint on MI300X
+# llamacpp-serve bootstrap - one-click llama.cpp OpenAI endpoint on AMD Instinct
 # v4: binaries AND the Qwen3.8-Flash-Next vision projector ship BAKED in the image;
 #     the volume build is an escape hatch. Flags are parsed before any download,
 #     and a failure leaves the pod up with STATUS.md instead of a restart loop.
@@ -120,8 +120,11 @@ else
     cd "$LLAMA_DIR" && git fetch --all --tags -q && git checkout -q "$LLAMA_REF" || fail "checkout $LLAMA_REF"
     # Same numerics gate the image enforces (see Dockerfile / README).
     git merge-base --is-ancestor e79e4bf66 HEAD || fail "ref predates e79e4bf66 unsafe-math removal"
+    # Build for the GPU this pod actually has - one arch compiles fastest - and fall
+    # back to the image default pair if the enumerator is missing.
+    ARCH=$(rocm_agent_enumerator 2>/dev/null | grep -m1 -v '^gfx000$')
     HIPCXX="$(hipconfig -l)/clang" HIP_PATH="$(hipconfig -R)" \
-    cmake -B build -DGGML_HIP=ON -DGPU_TARGETS=gfx942 -DGGML_CCACHE=ON \
+    cmake -B build -DGGML_HIP=ON -DGPU_TARGETS="${ARCH:-gfx942;gfx950}" -DGGML_CCACHE=ON \
           -DLLAMA_CURL=ON -DCMAKE_BUILD_TYPE=Release >/dev/null || fail "cmake configure"
     cmake --build build -j"$(nproc)" --target llama-server llama-bench >/dev/null || fail "build"
     BIN="$VOL_BIN"

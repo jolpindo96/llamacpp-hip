@@ -16,14 +16,14 @@ on:
         default: false
         type: boolean
       rocm_tag:
-        description: 'ROCm base image tag (default 7.14.0-full; e.g. 10.0.0-full)'
+        description: 'ROCm base image tag (default 10.0.0-full; 7.14.0-full for the 2026-08 reference)'
         required: false
-        default: '7.14.0-full'
+        default: '10.0.0-full'
         type: string
       gpu_targets:
-        description: 'HIP arch(s), ";"-separated (default gfx942; e.g. gfx942;gfx950)'
+        description: 'HIP arch(s), ";"-separated (default gfx942;gfx950 - one image for MI300X/MI325X/MI350X/MI355X)'
         required: false
-        default: 'gfx942'
+        default: 'gfx942;gfx950'
         type: string
       image_rev:
         description: 'Tag suffix for a rebuild that changes the image but not the pin (e.g. r2)'
@@ -57,22 +57,24 @@ jobs:
           fi
           [ -n "$REF" ] || { echo "could not resolve LLAMA_REF"; exit 1; }
           OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          # A tag push carries no inputs, so it always builds the default ROCm.
-          # Only workflow_dispatch can select a variant.
+          # A tag push carries no inputs, so it builds the defaults: ROCm 10 and
+          # gfx942+gfx950. Only workflow_dispatch can select another variant.
           ROCM_TAG="${{ inputs.rocm_tag }}"
-          ROCM_TAG="${ROCM_TAG:-7.14.0-full}"
-          # The image tag names the llama.cpp pin. A non-default ROCm gets a
-          # suffix so a variant can never overwrite the reference build.
+          ROCM_TAG="${ROCM_TAG:-10.0.0-full}"
+          # The image tag names the llama.cpp pin. Suffixes describe the contents,
+          # not the default, so every existing tag keeps its meaning: no suffix =
+          # ROCm 7.14 (the 2026-08 reference builds), -rocm10 = ROCm 10.
           if [ "$ROCM_TAG" = "7.14.0-full" ]; then
             ROCM_SUFFIX=""
           else
             ROCM_SUFFIX="-rocm${ROCM_TAG%%.*}"     # 10.0.0-full -> -rocm10
           fi
           # HIP arch(s). Multi-target emits one fat binary carrying code for every
-          # arch, as upstream's own release job does. Default stays single-arch
-          # gfx942 so a tag push keeps producing the reference image.
+          # arch, as upstream's own release job does; the runtime picks the code
+          # object matching the card, so one tag serves gfx942 and gfx950 alike and
+          # cross-arch runs share one build. No suffix = gfx942 only.
           GPU_TARGETS="${{ inputs.gpu_targets }}"
-          GPU_TARGETS="${GPU_TARGETS:-gfx942}"
+          GPU_TARGETS="${GPU_TARGETS:-gfx942;gfx950}"
           case "$GPU_TARGETS" in
             gfx942)  ARCH_SUFFIX="" ;;
             *\;*) ARCH_SUFFIX="-multi" ;;

@@ -1,16 +1,18 @@
 # syntax=docker/dockerfile:1
 #
-# Pinned llama.cpp HIP build for MI300X (gfx942), baked into a bootable image.
+# Pinned llama.cpp HIP build for AMD Instinct, baked into a bootable image.
+# Default: one fat binary for gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X).
 #
-# Base: rocm/dev-ubuntu-24.04:7.14.0-full
+# Base: rocm/dev-ubuntu-24.04:10.0.0-full (default since 2026-09-24)
+#   gfx950 needs ROCm 10: on 7.14 its immature kernels made MI355X prefill 2.2x
+#   slower, while on gfx942 llama.cpp measured the same on both. 7.14.0-full, the
+#   ROCm of the 2026-08-20 Batch-1 Engine Shootout, stays selectable via ROCM_TAG.
 #   AMD renamed the dev-toolchain variant from "-complete" to "-full" at 7.14;
-#   there is NO 7.14.0-complete and NO bare 7.14.0 runtime tag. 7.14.0-full is
-#   byte-identical to :latest as of 2026-07-15. This is the exact ROCm the
-#   2026-08-20 Batch-1 Engine Shootout ran on, so anchor numbers stay comparable.
+#   there is NO 7.14.0-complete and NO bare 7.14.0 runtime tag.
 #
 # Both stages use the same fat base on purpose (see README "Fat vs slim").
 
-ARG ROCM_TAG=7.14.0-full
+ARG ROCM_TAG=10.0.0-full
 ARG BASE=rocm/dev-ubuntu-24.04:${ROCM_TAG}
 
 # --------------------------------------------------------------- assets stage
@@ -51,7 +53,7 @@ RUN set -eu; \
 FROM ${BASE} AS build
 
 ARG LLAMA_REF
-ARG GPU_TARGETS=gfx942
+ARG GPU_TARGETS="gfx942;gfx950"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake git ccache libcurl4-openssl-dev libssl-dev ca-certificates \
@@ -114,7 +116,7 @@ RUN set -eu; \
 FROM ${BASE} AS runtime
 
 ARG LLAMA_REF
-ARG GPU_TARGETS=gfx942
+ARG GPU_TARGETS="gfx942;gfx950"
 LABEL org.opencontainers.image.revision="${LLAMA_REF}" \
       com.jolpindo.hip.targets="${GPU_TARGETS}" \
       org.opencontainers.image.source="https://github.com/ggml-org/llama.cpp" \

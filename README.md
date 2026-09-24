@@ -1,7 +1,8 @@
 # llamacpp-hip
 
-Pinned [llama.cpp](https://github.com/ggml-org/llama.cpp) HIP builds for AMD MI300X
-(`gfx942`), baked into a bootable image and published to GHCR.
+Pinned [llama.cpp](https://github.com/ggml-org/llama.cpp) HIP builds for AMD Instinct,
+baked into a bootable image and published to GHCR. By default one image carries code
+for both `gfx942` (MI300X, MI325X) and `gfx950` (MI350X, MI355X).
 
 Push a tag → GitHub Actions builds → GHCR stores it → a RunPod template boots
 straight to an OpenAI-compatible endpoint. No local Docker, nothing large ever
@@ -11,7 +12,8 @@ leaves a home connection.
 git tag llama-6036c635e && git push origin llama-6036c635e
 ```
 
-produces `ghcr.io/<owner>/llamacpp-hip:6036c635e`.
+produces `ghcr.io/<owner>/llamacpp-hip:6036c635e-multi-rocm10`: ROCm 10, `gfx942` +
+`gfx950`, the default since 2026-09-24 (see *Tags*).
 
 `LLAMA_REF` is the only thing that changes on a routine update — it comes from the
 tag name. `:latest` is never published automatically; pinned tags are the product,
@@ -25,7 +27,13 @@ llama.cpp won single-user decode on MI300X by ~1.6× over SGLang (SGLang won pre
 by ~5×). Reference anchor: Qwen3.5-122B-A10B Q8_0 at 91.3 tok/s (llama-bench tg128)
 and 88.6 tok/s served.
 
-## Base image: `rocm/dev-ubuntu-24.04:7.14.0-full`
+## Base image: `rocm/dev-ubuntu-24.04:10.0.0-full`
+
+The default since 2026-09-24. gfx950 needs ROCm 10: on 7.14 its immature kernels made
+MI355X prefill 2.2x slower (gpt-oss-20b MXFP4, 3,922 vs 8,739 t/s), while on gfx942
+llama.cpp measured the same on both (0.98x). `7.14.0-full`, the ROCm the 2026-08-20
+shootout ran on, stays selectable with `rocm_tag=7.14.0-full`. The notes below are from
+choosing that original 7.14 base.
 
 Verified against the registry rather than assumed, because tag names are hypotheses:
 
@@ -88,11 +96,27 @@ same `.cu` sources through `ggml-hip/CMakeLists.txt`, which never sets those fla
   The previous bootstrap used `.../rocm/apt/latest`, which was unpinned; baking
   removes that code path entirely.
 - **Auth is the built-in `GITHUB_TOKEN`** with `packages: write`. No PATs.
-- A tag push builds single-target `gfx942` on ROCm 7.14. `workflow_dispatch` selects
-  variants: `gpu_targets='gfx942;gfx950'` → `-multi`, `rocm_tag=10.0.0-full` → `-rocm10`.
+- A tag push, or a `workflow_dispatch` with only `ref`, builds the default: ROCm 10,
+  `gfx942;gfx950` → `:<ref>-multi-rocm10`. `rocm_tag=7.14.0-full` drops the `-rocm10`
+  suffix and `gpu_targets=gfx942` drops `-multi`, for the older kinds of image.
 - **Rebuilding without a pin change** (e.g. a bootstrap fix): add `image_rev=r2` →
   `:<ref>-multi-rocm10-r2`. A new tag rather than an overwrite, so a host that cached
   the old image cannot keep serving it.
+
+## Tags
+
+Suffixes describe what is inside, so a tag never changes meaning:
+
+| Suffix | ROCm | GPU code | Runs on |
+|---|---|---|---|
+| `-multi-rocm10` (default) | 10 | gfx942 + gfx950 | MI300X, MI325X, MI350X, MI355X. Use it for every cross-architecture comparison: one build, only the card changes |
+| `-multi` | 7.14 | gfx942 + gfx950 | gfx942. It also starts on gfx950, but 7.14's gfx950 kernels are immature there (prefill 2.2x slower), so its gfx950 numbers mislead |
+| `-rocm10` | 10 | gfx942 | MI300X, MI325X only |
+| *(none)* | 7.14 | gfx942 | MI300X, MI325X only: the 2026-08 reference builds |
+
+A single `-multi` image has no runtime cost: HIP loads the code object that matches the
+card. For cross-vendor comparisons, match the llama.cpp commit with the sibling
+`llamacpp-cuda` image (e.g. `26394b4e6` exists in both).
 
 ## serve-bootstrap.sh
 
