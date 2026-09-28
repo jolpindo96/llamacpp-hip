@@ -9,11 +9,15 @@
 #   ROCm of the 2026-08-20 Batch-1 Engine Shootout, stays selectable via ROCM_TAG.
 #   AMD renamed the dev-toolchain variant from "-complete" to "-full" at 7.14;
 #   there is NO 7.14.0-complete and NO bare 7.14.0 runtime tag.
+#   UBUNTU=26.04 selects AMD's rocm/dev-ubuntu-26.04 twin (same ROCm tags, same
+#   day): ROCm is identical, only Ubuntu's userland (GCC, glibc, Python, OpenSSH)
+#   changes.
 #
 # Both stages use the same fat base on purpose (see README "Fat vs slim").
 
 ARG ROCM_TAG=10.0.0-full
-ARG BASE=rocm/dev-ubuntu-24.04:${ROCM_TAG}
+ARG UBUNTU=24.04
+ARG BASE=rocm/dev-ubuntu-${UBUNTU}:${ROCM_TAG}
 
 # --------------------------------------------------------------- assets stage
 # Vision projector for Qwen3.8-Flash-Next.
@@ -117,8 +121,12 @@ FROM ${BASE} AS runtime
 
 ARG LLAMA_REF
 ARG GPU_TARGETS="gfx942;gfx950"
+ARG ROCM_TAG
+ARG UBUNTU
 LABEL org.opencontainers.image.revision="${LLAMA_REF}" \
       com.jolpindo.hip.targets="${GPU_TARGETS}" \
+      com.jolpindo.rocm="${ROCM_TAG}" \
+      com.jolpindo.ubuntu="${UBUNTU}" \
       org.opencontainers.image.source="https://github.com/ggml-org/llama.cpp" \
       org.opencontainers.image.title="llamacpp-hip" \
       org.opencontainers.image.description="Pinned llama.cpp HIP server image (targets: ${GPU_TARGETS})"

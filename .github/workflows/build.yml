@@ -30,13 +30,21 @@ on:
         required: false
         default: ''
         type: string
+      ubuntu:
+        description: 'Ubuntu of the ROCm base image (default 24.04; 26.04 adds the tag suffix -u2604)'
+        required: false
+        default: '24.04'
+        type: string
 
 permissions:
   contents: read
   packages: write
 
+# One queue per image tag: variants build in parallel, and a rebuild of the same tag
+# waits for the first. (One queue per branch made a third queued dispatch silently
+# cancel the pending one.)
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && format('{0}|{1}|{2}|{3}|{4}', inputs.ref, inputs.rocm_tag, inputs.gpu_targets, inputs.ubuntu, inputs.image_rev) || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -88,13 +96,23 @@ jobs:
             *[!a-z0-9.]*) echo "image_rev must match [a-z0-9.]+, got '$IMAGE_REV'"; exit 1 ;;
             *)            REV_SUFFIX="-${IMAGE_REV}" ;;
           esac
-          TAG="${REF}${ARCH_SUFFIX}${ROCM_SUFFIX}${REV_SUFFIX}"
+          # Ubuntu of the base image. No suffix = 24.04, the base of every tag
+          # published before 2026-09-28; 26.04 -> -u2604.
+          UBUNTU="${{ inputs.ubuntu }}"
+          UBUNTU="${UBUNTU:-24.04}"
+          case "$UBUNTU" in
+            24.04)                 UBUNTU_SUFFIX="" ;;
+            [0-9][0-9].[0-9][0-9]) UBUNTU_SUFFIX="-u${UBUNTU//./}" ;;
+            *) echo "ubuntu must look like 26.04, got '$UBUNTU'"; exit 1 ;;
+          esac
+          TAG="${REF}${ARCH_SUFFIX}${ROCM_SUFFIX}${UBUNTU_SUFFIX}${REV_SUFFIX}"
           echo "ref=$REF"                          >> "$GITHUB_OUTPUT"
           echo "rocm_tag=$ROCM_TAG"                >> "$GITHUB_OUTPUT"
           echo "gpu_targets=$GPU_TARGETS"          >> "$GITHUB_OUTPUT"
+          echo "ubuntu=$UBUNTU"                    >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"                          >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/$OWNER/llamacpp-hip" >> "$GITHUB_OUTPUT"
-          echo "Pinning llama.cpp @ $REF | ROCm $ROCM_TAG | arch $GPU_TARGETS -> ghcr.io/$OWNER/llamacpp-hip:$TAG"
+          echo "Pinning llama.cpp @ $REF | ROCm $ROCM_TAG | Ubuntu $UBUNTU | arch $GPU_TARGETS -> ghcr.io/$OWNER/llamacpp-hip:$TAG"
 
       # The ROCm dev base is ~8GB compressed and the build tree adds several more;
       # a stock runner does not have room. Same action and settings upstream
@@ -133,6 +151,7 @@ jobs:
             LLAMA_REF=${{ steps.vars.outputs.ref }}
             ROCM_TAG=${{ steps.vars.outputs.rocm_tag }}
             GPU_TARGETS=${{ steps.vars.outputs.gpu_targets }}
+            UBUNTU=${{ steps.vars.outputs.ubuntu }}
           # :latest is opt-in only. Pinned tags are the product; a moving
           # :latest would defeat the reproducibility the pin exists for.
           tags: |
@@ -152,7 +171,7 @@ jobs:
             echo ""
             echo "llama.cpp pin: \`${{ steps.vars.outputs.ref }}\`"
             echo ""
-            echo "ROCm base: \`${{ steps.vars.outputs.rocm_tag }}\`"
+            echo "ROCm base: \`rocm/dev-ubuntu-${{ steps.vars.outputs.ubuntu }}:${{ steps.vars.outputs.rocm_tag }}\`"
             echo ""
             echo "HIP targets: \`${{ steps.vars.outputs.gpu_targets }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -35,6 +35,20 @@ llama.cpp measured the same on both (0.98x). `7.14.0-full`, the ROCm the 2026-08
 shootout ran on, stays selectable with `rocm_tag=7.14.0-full`. The notes below are from
 choosing that original 7.14 base.
 
+`ubuntu=26.04` builds on AMD's `rocm/dev-ubuntu-26.04` twin, which carries the same ROCm
+tags, published the same days, and which ROCm 7.14 lists as supported. ROCm is identical
+in both, so GPU code and the HIP runtime do not change; only Ubuntu's userland moves:
+
+| | 24.04 | 26.04 |
+|---|---|---|
+| GCC (llama.cpp's host code) | 13 | 15.2 |
+| glibc | 2.39 | 2.43 |
+| Python (bootstrap venv) | 3.12 | 3.14 |
+| OpenSSH (pod SSH) | 9.6 | 10.2 |
+
+Under evaluation since 2026-09-28: 24.04 retires once a same-pin A/B shows decode speed
+within noise and identical greedy output, and a 26.04 image has booted a pod end to end.
+
 Verified against the registry rather than assumed, because tag names are hypotheses:
 
 | Tag | Compressed | Updated | Notes |
@@ -102,6 +116,10 @@ same `.cu` sources through `ggml-hip/CMakeLists.txt`, which never sets those fla
 - **Rebuilding without a pin change** (e.g. a bootstrap fix): add `image_rev=r2` →
   `:<ref>-multi-rocm10-r2`. A new tag rather than an overwrite, so a host that cached
   the old image cannot keep serving it.
+- `ubuntu=26.04` → `:<ref>-multi-rocm10-u2604` (before any `-rN`).
+- **One queue per image tag.** Different variants build in parallel; a second build
+  of the same tag waits. Until 2026-09-28 all dispatches shared one queue per branch,
+  where a third queued run silently cancelled the pending one.
 
 ## Tags
 
@@ -113,6 +131,9 @@ Suffixes describe what is inside, so a tag never changes meaning:
 | `-multi` | 7.14 | gfx942 + gfx950 | gfx942. It also starts on gfx950, but 7.14's gfx950 kernels are immature there (prefill 2.2x slower), so its gfx950 numbers mislead |
 | `-rocm10` | 10 | gfx942 | MI300X, MI325X only |
 | *(none)* | 7.14 | gfx942 | MI300X, MI325X only: the 2026-08 reference builds |
+
+`-u2604` after the ROCm part means an Ubuntu 26.04 base; no `-u` suffix means 24.04.
+Images from 2026-09-28 on also carry `com.jolpindo.rocm` and `com.jolpindo.ubuntu` labels.
 
 A single `-multi` image has no runtime cost: HIP loads the code object that matches the
 card. For cross-vendor comparisons, match the llama.cpp commit with the sibling
