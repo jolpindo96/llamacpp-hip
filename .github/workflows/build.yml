@@ -31,9 +31,9 @@ on:
         default: ''
         type: string
       ubuntu:
-        description: 'Ubuntu of the ROCm base image (default 24.04; 26.04 adds the tag suffix -u2604)'
+        description: 'Ubuntu of the ROCm base image (default 26.04, tag suffix -u2604; 24.04 has no suffix)'
         required: false
-        default: '24.04'
+        default: '26.04'
         type: string
 
 permissions:
@@ -96,10 +96,10 @@ jobs:
             *[!a-z0-9.]*) echo "image_rev must match [a-z0-9.]+, got '$IMAGE_REV'"; exit 1 ;;
             *)            REV_SUFFIX="-${IMAGE_REV}" ;;
           esac
-          # Ubuntu of the base image. No suffix = 24.04, the base of every tag
-          # published before 2026-09-28; 26.04 -> -u2604.
+          # Ubuntu of the base image, 26.04 by default since 2026-09-28 (campaign A19).
+          # No suffix = 24.04, the base of every tag published before then; 26.04 -> -u2604.
           UBUNTU="${{ inputs.ubuntu }}"
-          UBUNTU="${UBUNTU:-24.04}"
+          UBUNTU="${UBUNTU:-26.04}"
           case "$UBUNTU" in
             24.04)                 UBUNTU_SUFFIX="" ;;
             [0-9][0-9].[0-9][0-9]) UBUNTU_SUFFIX="-u${UBUNTU//./}" ;;

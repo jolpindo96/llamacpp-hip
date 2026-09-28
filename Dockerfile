@@ -3,20 +3,22 @@
 # Pinned llama.cpp HIP build for AMD Instinct, baked into a bootable image.
 # Default: one fat binary for gfx942 (MI300X/MI325X) and gfx950 (MI350X/MI355X).
 #
-# Base: rocm/dev-ubuntu-24.04:10.0.0-full (default since 2026-09-24)
+# Base: rocm/dev-ubuntu-26.04:10.0.0-full (ROCm 10 since 2026-09-24, Ubuntu 26.04
+# since 2026-09-28)
 #   gfx950 needs ROCm 10: on 7.14 its immature kernels made MI355X prefill 2.2x
 #   slower, while on gfx942 llama.cpp measured the same on both. 7.14.0-full, the
 #   ROCm of the 2026-08-20 Batch-1 Engine Shootout, stays selectable via ROCM_TAG.
 #   AMD renamed the dev-toolchain variant from "-complete" to "-full" at 7.14;
 #   there is NO 7.14.0-complete and NO bare 7.14.0 runtime tag.
-#   UBUNTU=26.04 selects AMD's rocm/dev-ubuntu-26.04 twin (same ROCm tags, same
-#   day): ROCm is identical, only Ubuntu's userland (GCC, glibc, Python, OpenSSH)
-#   changes.
+#   AMD publishes every ROCm tag for both Ubuntu 24.04 and 26.04. ROCm is identical
+#   in both; only Ubuntu's userland (GCC, glibc, Python, OpenSSH) differs. Campaign
+#   A19 measured the same speed, identical greedy output and a clean pod boot on
+#   26.04; UBUNTU=24.04 selects the previous base.
 #
 # Both stages use the same fat base on purpose (see README "Fat vs slim").
 
 ARG ROCM_TAG=10.0.0-full
-ARG UBUNTU=24.04
+ARG UBUNTU=26.04
 ARG BASE=rocm/dev-ubuntu-${UBUNTU}:${ROCM_TAG}
 
 # --------------------------------------------------------------- assets stage

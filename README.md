@@ -12,8 +12,8 @@ leaves a home connection.
 git tag llama-6036c635e && git push origin llama-6036c635e
 ```
 
-produces `ghcr.io/<owner>/llamacpp-hip:6036c635e-multi-rocm10`: ROCm 10, `gfx942` +
-`gfx950`, the default since 2026-09-24 (see *Tags*).
+produces `ghcr.io/<owner>/llamacpp-hip:6036c635e-multi-rocm10-u2604`: ROCm 10 on
+Ubuntu 26.04, `gfx942` + `gfx950`, the default since 2026-09-28 (see *Tags*).
 
 `LLAMA_REF` is the only thing that changes on a routine update — it comes from the
 tag name. `:latest` is never published automatically; pinned tags are the product,
@@ -27,17 +27,18 @@ llama.cpp won single-user decode on MI300X by ~1.6× over SGLang (SGLang won pre
 by ~5×). Reference anchor: Qwen3.5-122B-A10B Q8_0 at 91.3 tok/s (llama-bench tg128)
 and 88.6 tok/s served.
 
-## Base image: `rocm/dev-ubuntu-24.04:10.0.0-full`
+## Base image: `rocm/dev-ubuntu-26.04:10.0.0-full`
 
-The default since 2026-09-24. gfx950 needs ROCm 10: on 7.14 its immature kernels made
+ROCm 10 is the default since 2026-09-24. gfx950 needs ROCm 10: on 7.14 its immature kernels made
 MI355X prefill 2.2x slower (gpt-oss-20b MXFP4, 3,922 vs 8,739 t/s), while on gfx942
 llama.cpp measured the same on both (0.98x). `7.14.0-full`, the ROCm the 2026-08-20
 shootout ran on, stays selectable with `rocm_tag=7.14.0-full`. The notes below are from
 choosing that original 7.14 base.
 
-`ubuntu=26.04` builds on AMD's `rocm/dev-ubuntu-26.04` twin, which carries the same ROCm
-tags, published the same days, and which ROCm 7.14 lists as supported. ROCm is identical
-in both, so GPU code and the HIP runtime do not change; only Ubuntu's userland moves:
+Ubuntu 26.04 is the default since 2026-09-28. AMD publishes `rocm/dev-ubuntu-26.04` with
+the same ROCm tags as `rocm/dev-ubuntu-24.04`, on the same days, and ROCm 7.14 lists 26.04
+as supported. ROCm is identical in both, so GPU code and the HIP runtime do not change;
+only Ubuntu's userland moves:
 
 | | 24.04 | 26.04 |
 |---|---|---|
@@ -46,8 +47,21 @@ in both, so GPU code and the HIP runtime do not change; only Ubuntu's userland m
 | Python (bootstrap venv) | 3.12 | 3.14 |
 | OpenSSH (pod SSH) | 9.6 | 10.2 |
 
-Under evaluation since 2026-09-28: 24.04 retires once a same-pin A/B shows decode speed
-within noise and identical greedy output, and a 26.04 image has booted a pod end to end.
+24.04 retired after campaign A19 (MI325X, 2026-09-28), which ran the same pin
+`f1ea20621` on both bases:
+
+| Check | 24.04 | 26.04 |
+|---|---|---|
+| llama-bench tg128, Qwen3.5-122B Q8_0 | 103.39 ± 1.24 | 103.04 ± 1.21 |
+| Qwen3.5 served, ~200 / 2k / 12k tokens | 102.73 / 100.63 / 94.38 | 102.71 / 100.50 / 94.46 |
+| Qwen3.5 + MTP | 141.67 / 128.40 / 120.47 | 143.15 / 129.91 / 120.53 |
+| DSV4-Flash Vision-Exp, no drafter | 34.71 / 36.83 / 35.37 | 34.95 / 37.07 / 35.55 |
+| DSV4 + DSpark | 33.12 / 36.23 / 36.99 | 32.84 / 36.20 / 36.83 |
+| DSV4 12k-token time to first token | 17.64 s | 17.60 s |
+| greedy output, 18 prompts and chats | identical | identical |
+| pod boot (bootstrap to `READY`) | 15 s | 15 s, Python 3.14, huggingface_hub 2.0, `sshd` answers |
+
+`ubuntu=24.04` still builds the previous base, without the `-u2604` suffix.
 
 Verified against the registry rather than assumed, because tag names are hypotheses:
 
@@ -110,13 +124,13 @@ same `.cu` sources through `ggml-hip/CMakeLists.txt`, which never sets those fla
   The previous bootstrap used `.../rocm/apt/latest`, which was unpinned; baking
   removes that code path entirely.
 - **Auth is the built-in `GITHUB_TOKEN`** with `packages: write`. No PATs.
-- A tag push, or a `workflow_dispatch` with only `ref`, builds the default: ROCm 10,
-  `gfx942;gfx950` → `:<ref>-multi-rocm10`. `rocm_tag=7.14.0-full` drops the `-rocm10`
-  suffix and `gpu_targets=gfx942` drops `-multi`, for the older kinds of image.
+- A tag push, or a `workflow_dispatch` with only `ref`, builds the default: ROCm 10 on
+  Ubuntu 26.04, `gfx942;gfx950` → `:<ref>-multi-rocm10-u2604`. `rocm_tag=7.14.0-full`
+  drops the `-rocm10` suffix, `gpu_targets=gfx942` drops `-multi` and `ubuntu=24.04`
+  drops `-u2604`, for the older kinds of image.
 - **Rebuilding without a pin change** (e.g. a bootstrap fix): add `image_rev=r2` →
-  `:<ref>-multi-rocm10-r2`. A new tag rather than an overwrite, so a host that cached
-  the old image cannot keep serving it.
-- `ubuntu=26.04` → `:<ref>-multi-rocm10-u2604` (before any `-rN`).
+  `:<ref>-multi-rocm10-u2604-r2`. A new tag rather than an overwrite, so a host that
+  cached the old image cannot keep serving it.
 - **One queue per image tag.** Different variants build in parallel; a second build
   of the same tag waits. Until 2026-09-28 all dispatches shared one queue per branch,
   where a third queued run silently cancelled the pending one.
@@ -127,13 +141,14 @@ Suffixes describe what is inside, so a tag never changes meaning:
 
 | Suffix | ROCm | GPU code | Runs on |
 |---|---|---|---|
-| `-multi-rocm10` (default) | 10 | gfx942 + gfx950 | MI300X, MI325X, MI350X, MI355X. Use it for every cross-architecture comparison: one build, only the card changes |
+| `-multi-rocm10` | 10 | gfx942 + gfx950 | MI300X, MI325X, MI350X, MI355X. Use it for every cross-architecture comparison: one build, only the card changes |
 | `-multi` | 7.14 | gfx942 + gfx950 | gfx942. It also starts on gfx950, but 7.14's gfx950 kernels are immature there (prefill 2.2x slower), so its gfx950 numbers mislead |
 | `-rocm10` | 10 | gfx942 | MI300X, MI325X only |
 | *(none)* | 7.14 | gfx942 | MI300X, MI325X only: the 2026-08 reference builds |
 
-`-u2604` after the ROCm part means an Ubuntu 26.04 base; no `-u` suffix means 24.04.
-Images from 2026-09-28 on also carry `com.jolpindo.rocm` and `com.jolpindo.ubuntu` labels.
+`-u2604` after the ROCm part means an Ubuntu 26.04 base; no `-u` suffix means 24.04. The
+default build is `-multi-rocm10-u2604`. Images from 2026-09-28 on also carry
+`com.jolpindo.rocm` and `com.jolpindo.ubuntu` labels.
 
 A single `-multi` image has no runtime cost: HIP loads the code object that matches the
 card. For cross-vendor comparisons, match the llama.cpp commit with the sibling
