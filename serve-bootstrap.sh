@@ -20,10 +20,14 @@ SERVER_ARGS="${SERVER_ARGS:--c 16384 -ngl 999 -fa on --load-mode none}"
 # and also fails on a DEPRECATED warning: --no-mmap printed one for seven weeks
 # before it was deleted, so the image build treats deprecation as removal.
 # Otherwise a deprecation is only reported, and the pod still serves.
+# Draft length for a separate draft file: 4 fits DSpark's block_size 5, unless
+# SERVER_ARGS sets its own - a flag given twice is DEPRECATED in llama.cpp
+# ("specified multiple times ... only last value will be used").
+draft_nmax(){ case " $SERVER_ARGS " in *" --spec-draft-n-max "*) ;; *) echo "--spec-draft-n-max 4" ;; esac; }
 args_ok(){
     local draft="" mmproj="" out dep
     if [ -n "${DRAFT_REPO:-}" ] || [ "${2:-}" = all ]; then
-        draft="--spec-draft-model /dev/null --spec-draft-n-max 4"
+        draft="--spec-draft-model /dev/null $(draft_nmax)"
     fi
     if [ -n "${MMPROJ_REPO:-}${MMPROJ:-}" ] || [ "${2:-}" = all ]; then
         mmproj="--mmproj /dev/null"
@@ -188,7 +192,7 @@ if [ -n "$DRAFT_REPO" ]; then
     shards_complete "$WS/draft" || \
         HF_XET_HIGH_PERFORMANCE=1 "$HF" download \
         "$DRAFT_REPO" --include "$DRAFT_GLOB" --local-dir $WS/draft || fail "draft download"
-    DRAFT_FLAG="--spec-draft-model $(find $WS/draft -name '*.gguf' | sort | head -1) --spec-draft-n-max 4"
+    DRAFT_FLAG="--spec-draft-model $(find $WS/draft -name '*.gguf' | sort | head -1) $(draft_nmax)"
 fi
 
 # 3b. Vision projector (mmproj) -------------------------------------------------

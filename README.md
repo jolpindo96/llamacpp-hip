@@ -347,7 +347,9 @@ independent of that checkout.
 - `dflash.block_size = 5` is present, so the loader does **not** fall back to its
   default of 16. `dflash.sample_from_anchor` is absent → false.
 - Therefore `n_draft_max = block_size - 1 = 4`, which is exactly what the bootstrap
-  passes as `--spec-draft-n-max 4`.
+  passes as `--spec-draft-n-max 4`. A `--spec-draft-n-max` in `SERVER_ARGS` replaces
+  it (the bootstrap then adds none), e.g. 2 for an MTP sidecar: llama.cpp flags a
+  repeated argument as DEPRECATED.
 - `mask_token_id = 128799` matches the base model's `dspark_noise_token_id`.
 - 3 layers, `256x594M`, imatrix-quantized.
 
