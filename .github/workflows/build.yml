@@ -16,7 +16,7 @@ on:
         default: false
         type: boolean
       rocm_tag:
-        description: 'ROCm base image tag (default 10.0.0-full; 7.14.0-full for the 2026-08 reference)'
+        description: 'ROCm base image tag (default 10.0.0-full; 7.14.0-full for the 2026-08 reference; 10.1.0-full -> tag suffix -rocm10.1)'
         required: false
         default: '10.0.0-full'
         type: string
@@ -71,12 +71,17 @@ jobs:
           ROCM_TAG="${ROCM_TAG:-10.0.0-full}"
           # The image tag names the llama.cpp pin. Suffixes describe the contents,
           # not the default, so every existing tag keeps its meaning: no suffix =
-          # ROCm 7.14 (the 2026-08 reference builds), -rocm10 = ROCm 10.
-          if [ "$ROCM_TAG" = "7.14.0-full" ]; then
-            ROCM_SUFFIX=""
-          else
-            ROCM_SUFFIX="-rocm${ROCM_TAG%%.*}"     # 10.0.0-full -> -rocm10
-          fi
+          # ROCm 7.14.0 (the 2026-08 reference builds), -rocm10 = ROCm 10.0.0. Any
+          # other release carries its version minus a trailing .0 (10.1.0-full ->
+          # -rocm10.1, 10.1.1-full -> -rocm10.1.1): a major-only suffix would have
+          # given 10.1 the 10.0 image's tag and overwritten it.
+          ROCM_VER="${ROCM_TAG%%-*}"                 # 10.1.0-full -> 10.1.0
+          case "$ROCM_VER" in
+            7.14.0) ROCM_SUFFIX="" ;;
+            10.0.0) ROCM_SUFFIX="-rocm10" ;;
+            [0-9]*.[0-9]*.[0-9]*) ROCM_SUFFIX="-rocm${ROCM_VER%.0}" ;;
+            *) echo "rocm_tag must look like 10.1.0-full, got '$ROCM_TAG'"; exit 1 ;;
+          esac
           # HIP arch(s). Multi-target emits one fat binary carrying code for every
           # arch, as upstream's own release job does; the runtime picks the code
           # object matching the card, so one tag serves gfx942 and gfx950 alike and

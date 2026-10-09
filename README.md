@@ -127,7 +127,8 @@ same `.cu` sources through `ggml-hip/CMakeLists.txt`, which never sets those fla
 - A tag push, or a `workflow_dispatch` with only `ref`, builds the default: ROCm 10 on
   Ubuntu 26.04, `gfx942;gfx950` → `:<ref>-multi-rocm10-u2604`. `rocm_tag=7.14.0-full`
   drops the `-rocm10` suffix, `gpu_targets=gfx942` drops `-multi` and `ubuntu=24.04`
-  drops `-u2604`, for the older kinds of image.
+  drops `-u2604`, for the older kinds of image. Any other ROCm release carries its
+  version: `rocm_tag=10.1.0-full` → `:<ref>-multi-rocm10.1-u2604`.
 - **Rebuilding without a pin change** (e.g. a bootstrap fix): add `image_rev=r2` →
   `:<ref>-multi-rocm10-u2604-r2`. A new tag rather than an overwrite, so a host that
   cached the old image cannot keep serving it.
@@ -141,9 +142,10 @@ Suffixes describe what is inside, so a tag never changes meaning:
 
 | Suffix | ROCm | GPU code | Runs on |
 |---|---|---|---|
-| `-multi-rocm10` | 10 | gfx942 + gfx950 | MI300X, MI325X, MI350X, MI355X. Use it for every cross-architecture comparison: one build, only the card changes |
+| `-multi-rocm10` | 10.0 | gfx942 + gfx950 | MI300X, MI325X, MI350X, MI355X. Use it for every cross-architecture comparison: one build, only the card changes |
+| `-multi-rocm10.1` | 10.1 | gfx942 + gfx950 | As above, on ROCm 10.1. Later releases follow the same pattern (`-rocm10.1.1`, `-rocm10.2`), so a point release never takes an earlier release's tag |
 | `-multi` | 7.14 | gfx942 + gfx950 | gfx942. It also starts on gfx950, but 7.14's gfx950 kernels are immature there (prefill 2.2x slower), so its gfx950 numbers mislead |
-| `-rocm10` | 10 | gfx942 | MI300X, MI325X only |
+| `-rocm10` | 10.0 | gfx942 | MI300X, MI325X only |
 | *(none)* | 7.14 | gfx942 | MI300X, MI325X only: the 2026-08 reference builds |
 
 `-u2604` after the ROCm part means an Ubuntu 26.04 base; no `-u` suffix means 24.04. The

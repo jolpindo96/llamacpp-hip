@@ -233,13 +233,16 @@ if [ -n "$MMPROJ_PATH" ]; then
 fi
 
 # 4. Status + serve -------------------------------------------------------------
+# GPU serial for STATUS.md: amd-smi first, since ROCm 10.1 dropped rocm-smi from the
+# standard build; rocm-smi stays the fallback for the 10.0 and 7.14 images.
+gpu_id(){ { amd-smi static --asic 2>/dev/null | grep -i -m1 serial; rocm-smi --showuniqueid 2>/dev/null; } | grep -o -m1 '0x[0-9a-fA-F]*' | head -1; }
 status(){ # $1 = STARTING, then READY once /health answers
 cat > $WS/STATUS.md <<EOF
 # $1 ($(date -u +%Y-%m-%dT%H:%M:%SZ))
 - binaries: $SOURCE @ ${ACTIVE_REV:0:9}  (baked image rev: ${BAKED_REV:0:9})
 - model: $MAIN ($TOTAL bytes, floor $MIN_MODEL_BYTES)
 - draft: ${DRAFT_REPO:-none separate (an MTP head in the model needs --spec-type draft-mtp in args)}
-- endpoint: :8000 OpenAI-compatible | GPU: $(rocm-smi --showuniqueid 2>/dev/null | grep -o '0x[0-9a-f]*' | head -1)
+- endpoint: :8000 OpenAI-compatible | GPU: $(gpu_id)
 - vision: ${MMPROJ_PATH:-off (text-only; set MMPROJ=baked for Qwen3.8-Flash-Next)}
 - args: $SERVER_ARGS $DRAFT_FLAG $MMPROJ_FLAG
 - flag warnings: ${FLAG_WARNING:-none}
